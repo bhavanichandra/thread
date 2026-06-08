@@ -2,16 +2,18 @@ FROM python:3.13.3-slim
 
 # Install uv
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.5.1 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
 # Copy dependency files first for better layer caching
 
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 
 RUN uv sync --no-dev
 
 COPY . .
+
+EXPOSE 8001
 
 CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]

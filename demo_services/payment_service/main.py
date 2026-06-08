@@ -10,6 +10,7 @@ class PaymentRequest(BaseModel):
     order_id: str
     amount: float
     customer_id: str
+    items: list[dict]
 
 
 @app.get("/health")
@@ -28,12 +29,16 @@ async def process_payment(payment: PaymentRequest):
         try:
             resp = await client.post(
                 f"{INVENTORY_SERVICE_URL}/api/v1/reserve",
-                json={"order_id": payment.order_id, "items": []},
+                json={"order_id": payment.order_id, "items": payment.items},
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             raise HTTPException(
                 status_code=502, detail=f"Inventory failed: {e.response.text}"
+            )
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=503, detail=f"Inventory unreachable: {str(e)}"
             )
     return {
         "payment_id": f"pay_{payment.order_id}",

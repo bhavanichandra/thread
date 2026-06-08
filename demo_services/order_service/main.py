@@ -42,6 +42,7 @@ async def create_order(order: OrderRequest):
                     "order_id": order_id,
                     "amount": order.total,
                     "customer_id": order.customer_id,
+                    "items": order.items,
                 },
             )
             resp.raise_for_status()
