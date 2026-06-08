@@ -8,9 +8,9 @@ WORKDIR /app
 
 # Copy dependency files first for better layer caching
 
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 
-RUN uv sync --no-dev
+RUN uv sync --no-dev --frozen
 
 COPY . .
 
