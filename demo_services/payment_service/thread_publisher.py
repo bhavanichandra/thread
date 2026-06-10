@@ -112,6 +112,7 @@ async def log_to_splunk(
 ) -> None:
     """Log structured event to Splunk HEC. Fire-and-forget."""
     trace_event_str = trace_event.value if hasattr(trace_event, "value") else str(trace_event)
+    ts = datetime.now(timezone.utc).isoformat()
 
     payload = {
         "time": _time.time(),
@@ -124,6 +125,7 @@ async def log_to_splunk(
             "sourceService":  source_service,
             "targetService":  target_service,
             "traceEvent":     trace_event_str,
+            "timestamp":      ts,
             "statusCode":     status_code,
             "durationMs":     duration_ms,
             "errorMessage":   error_message,

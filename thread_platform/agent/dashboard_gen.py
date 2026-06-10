@@ -57,10 +57,10 @@ def _validate_panel_specs(specs: list) -> tuple[bool, list]:
             logger.warning(f"[THREAD:DASHBOARD] Panel {i} unknown viz type: {viz}")
             return False, []
 
-        # Escape XML special characters
+        # Escape title to prevent XML injection, but keep SPL raw for CDATA wrapping
         validated.append({
-            "title": xml_escape(title)[:100],  # Limit title length
-            "spl": xml_escape(spl)[:500],       # Limit SPL length
+            "title": xml_escape(title)[:100],  # Escape and limit title
+            "spl": spl[:500],                   # Raw SPL, will be wrapped in CDATA
             "viz": viz,
         })
 
@@ -184,7 +184,11 @@ Format response as a JSON array (no markdown, no backticks):
 
 
 def _build_dashboard_xml(name: str, correlation_id: str, panels_spec: list) -> str:
-    """Build the dashboard XML with 3 panels from the LLM spec."""
+    """Build the dashboard XML with 3 panels from the LLM spec.
+
+    Uses CDATA for SPL queries to preserve literal text without XML escaping.
+    Uses escaped title to prevent injection into XML attributes.
+    """
     panels_xml = ""
     for i, panel in enumerate(panels_spec, 1):
         title = panel.get("title", f"Panel {i}")
@@ -196,7 +200,7 @@ def _build_dashboard_xml(name: str, correlation_id: str, panels_spec: list) -> s
     <panel>
       <title>{title}</title>
       <chart>
-        <search><query>{spl}</query><earliest>-1h</earliest><latest>now</latest></search>
+        <search><query><![CDATA[{spl}]]></query><earliest>-1h</earliest><latest>now</latest></search>
         <option name="charting.chart">line</option>
       </chart>
     </panel>
@@ -207,7 +211,7 @@ def _build_dashboard_xml(name: str, correlation_id: str, panels_spec: list) -> s
     <panel>
       <title>{title}</title>
       <chart>
-        <search><query>{spl}</query><earliest>-1h</earliest><latest>now</latest></search>
+        <search><query><![CDATA[{spl}]]></query><earliest>-1h</earliest><latest>now</latest></search>
         <option name="charting.chart">bar</option>
       </chart>
     </panel>
@@ -218,7 +222,7 @@ def _build_dashboard_xml(name: str, correlation_id: str, panels_spec: list) -> s
     <panel>
       <title>{title}</title>
       <table>
-        <search><query>{spl}</query><earliest>-1h</earliest><latest>now</latest></search>
+        <search><query><![CDATA[{spl}]]></query><earliest>-1h</earliest><latest>now</latest></search>
       </table>
     </panel>
   </row>
