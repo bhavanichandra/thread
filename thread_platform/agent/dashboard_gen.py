@@ -6,6 +6,7 @@ import os
 import json
 import httpx
 import logging
+from html import escape as xml_escape
 
 logger = logging.getLogger("thread-platform")
 
@@ -16,6 +17,54 @@ SPLUNK_PASSWORD = os.getenv("SPLUNK_PASSWORD", "")
 SPLUNK_BASE_URL = os.getenv("SPLUNK_BASE_URL", "http://localhost:8000")
 SPLUNK_INDEX = os.getenv("SPLUNK_INDEX", "thread_logs")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+
+def _validate_panel_specs(specs: list) -> tuple[bool, list]:
+    """
+    Validate LLM-generated panel specs.
+
+    Returns: (is_valid, validated_specs)
+    - Checks: exactly 3 panels, each has non-empty title and spl, viz is recognized
+    - Escapes: title and spl to prevent XML injection
+    - Returns empty list on validation failure
+    """
+    if not isinstance(specs, list):
+        logger.warning("[THREAD:DASHBOARD] Panel specs is not a list")
+        return False, []
+
+    if len(specs) != 3:
+        logger.warning(f"[THREAD:DASHBOARD] Expected 3 panels, got {len(specs)}")
+        return False, []
+
+    validated = []
+    for i, panel in enumerate(specs):
+        if not isinstance(panel, dict):
+            logger.warning(f"[THREAD:DASHBOARD] Panel {i} is not a dict")
+            return False, []
+
+        title = panel.get("title", "").strip()
+        spl = panel.get("spl", "").strip()
+        viz = panel.get("viz", "table").lower()
+
+        if not title or not spl:
+            logger.warning(
+                f"[THREAD:DASHBOARD] Panel {i} missing title or spl: "
+                f"title='{title}', spl_len={len(spl)}"
+            )
+            return False, []
+
+        if viz not in ("table", "timechart", "bar", "column"):
+            logger.warning(f"[THREAD:DASHBOARD] Panel {i} unknown viz type: {viz}")
+            return False, []
+
+        # Escape XML special characters
+        validated.append({
+            "title": xml_escape(title)[:100],  # Limit title length
+            "spl": xml_escape(spl)[:500],       # Limit SPL length
+            "viz": viz,
+        })
+
+    return True, validated
 
 
 async def generate_dashboard(
@@ -93,12 +142,18 @@ Format response as a JSON array (no markdown, no backticks):
                 content = content.strip()
 
             panels_spec = json.loads(content)
-            if not isinstance(panels_spec, list):
-                raise ValueError("Response is not an array")
 
     except Exception as e:
         logger.warning(f"[THREAD:DASHBOARD] LLM generation failed: {e}")
         return ""
+
+    # ── Validate panel specs ──────────────────────────────────────────────────
+    is_valid, validated_specs = _validate_panel_specs(panels_spec)
+    if not is_valid:
+        logger.warning("[THREAD:DASHBOARD] Panel validation failed, skipping dashboard")
+        return ""
+
+    panels_spec = validated_specs
 
     # ── Build Splunk dashboard XML ────────────────────────────────────────────
     dashboard_name = f"thread-{short_id}"
