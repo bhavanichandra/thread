@@ -119,8 +119,13 @@ async def consumer_loop():
                 # Set prefetch count to 10
                 await channel.set_qos(prefetch_count=10)
                 
-                # Make sure queue is declared
-                queue = await channel.declare_queue(THREAD_LOGS_QUEUE, durable=True)
+                queue = await channel.declare_queue(
+                    THREAD_LOGS_QUEUE,
+                    durable=True,
+                    arguments={
+                        "x-message-ttl": 86400000,  # 24h TTL in ms
+                    }
+                )
                 logger.info(f"Consumer connected. Subscribed to {THREAD_LOGS_QUEUE}")
                 
                 async with queue.iterator() as queue_iter:
