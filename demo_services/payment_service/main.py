@@ -5,7 +5,7 @@ import asyncio
 import logging
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from thread_publisher import publish_thread_event
 
 # Thread Logger custom filter to prevent KeyErrors on default logs
@@ -42,7 +42,7 @@ INVENTORY_URL = os.getenv("INVENTORY_SERVICE_URL", "http://localhost:8003")
 
 class PaymentRequest(BaseModel):
     order_id: str
-    amount: float
+    amount: float = Field(gt=0)
     customer_id: str
     items: list[dict]
 

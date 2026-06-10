@@ -3,6 +3,7 @@ import json
 import sqlite3
 import asyncio
 import logging
+import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import aio_pika
@@ -15,8 +16,18 @@ logger = logging.getLogger("thread-platform")
 DB_PATH = os.getenv("SQLITE_DB_PATH", "thread.db")
 THREAD_LOGS_QUEUE = os.getenv("THREAD_LOGS_QUEUE", "thread_logs_queue")
 
+# Database concurrency lock and persistent connection
+db_lock = threading.Lock()
+_db_conn = None
+
+def get_db_conn():
+    global _db_conn
+    if _db_conn is None:
+        _db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    return _db_conn
+
 def init_db():
-    """Create the SQLite database and schema if they don't exist."""
+    """Create the SQLite database, schema, and indexes if they don't exist."""
     conn = sqlite3.connect(DB_PATH)
     try:
         cursor = conn.cursor()
@@ -37,8 +48,17 @@ def init_db():
                 timestamp TEXT NOT NULL
             )
         """)
+        # Indexes for query performance
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_correlationId ON thread_messages (correlationId)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_transactionId ON thread_messages (transactionId)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_sourceService ON thread_messages (sourceService)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_targetService ON thread_messages (targetService)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_timestamp ON thread_messages (timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_corr_time ON thread_messages (correlationId, timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_trans_time ON thread_messages (transactionId, timestamp)")
+        
         conn.commit()
-        logger.info(f"Database initialized at {DB_PATH}. Table thread_messages is ready.")
+        logger.info(f"Database initialized at {DB_PATH}. Table thread_messages and indexes are ready.")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
         raise e
@@ -46,36 +66,46 @@ def init_db():
         conn.close()
 
 def save_message_to_db(data: dict):
-    """Write log event to SQLite table thread_messages."""
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO thread_messages (
-                correlationId, transactionId, sourceService, targetService,
-                traceEvent, method, url, body, statusCode, durationMs,
-                errorMessage, timestamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            data.get("correlationId"),
-            data.get("transactionId"),
-            data.get("sourceService"),
-            data.get("targetService"),
-            data.get("traceEvent"),
-            data.get("method"),
-            data.get("url"),
-            json.dumps(data.get("body")) if data.get("body") is not None else None,
-            data.get("statusCode"),
-            data.get("durationMs"),
-            data.get("errorMessage"),
-            data.get("timestamp")
-        ))
-        conn.commit()
-        logger.info(f"Saved message from {data.get('sourceService')} to {data.get('targetService')} - event: {data.get('traceEvent')}")
-    except Exception as e:
-        logger.error(f"Failed to save message to SQLite: {e}")
-    finally:
-        conn.close()
+    """Write log event to SQLite table thread_messages using the shared connection."""
+    body_val = data.get("body")
+    body_serialized = None
+    if body_val is not None:
+        if isinstance(body_val, (dict, list)):
+            try:
+                body_serialized = json.dumps(body_val)
+            except (TypeError, ValueError):
+                body_serialized = str(body_val)
+        else:
+            body_serialized = str(body_val)
+
+    conn = get_db_conn()
+    with db_lock:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO thread_messages (
+                    correlationId, transactionId, sourceService, targetService,
+                    traceEvent, method, url, body, statusCode, durationMs,
+                    errorMessage, timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                data.get("correlationId"),
+                data.get("transactionId"),
+                data.get("sourceService"),
+                data.get("targetService"),
+                data.get("traceEvent"),
+                data.get("method"),
+                data.get("url"),
+                body_serialized,
+                data.get("statusCode"),
+                data.get("durationMs"),
+                data.get("errorMessage"),
+                data.get("timestamp")
+            ))
+            conn.commit()
+            logger.info(f"Saved message from {data.get('sourceService')} to {data.get('targetService')} - event: {data.get('traceEvent')}")
+        except Exception as e:
+            logger.error(f"Failed to save message to SQLite: {e}")
 
 async def consumer_loop():
     """Background task consuming messages from RabbitMQ and writing them to SQLite."""
@@ -112,8 +142,8 @@ async def consumer_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize DB schema
-    init_db()
+    # Initialize DB schema and indexes in a background thread to prevent blocking
+    await asyncio.to_thread(init_db)
     
     # Run setup queues to declare all queues on startup
     await setup_queues()
@@ -129,6 +159,15 @@ async def lifespan(app: FastAPI):
         await consumer_task
     except asyncio.CancelledError:
         pass
+    
+    # Close persistent DB connection if open
+    global _db_conn
+    if _db_conn is not None:
+        try:
+            _db_conn.close()
+            logger.info("Closed persistent database connection.")
+        except Exception as e:
+            logger.error(f"Error closing DB connection on shutdown: {e}")
 
 app = FastAPI(title="Thread Platform", lifespan=lifespan)
 
