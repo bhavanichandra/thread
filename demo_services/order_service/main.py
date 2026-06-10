@@ -6,7 +6,7 @@ import logging
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
-from thread_publisher import publish_thread_event
+from thread_publisher import publish_thread_event, log_to_splunk
 
 # Thread Logger custom filter to prevent KeyErrors on default logs
 class ThreadLogFilter(logging.Filter):
@@ -94,6 +94,13 @@ async def create_order(order: OrderRequest, request: Request):
         url=str(request.url),
         body=order.model_dump(),
     ))
+    _fire(log_to_splunk(
+        correlation_id=correlation_id,
+        transaction_id=transaction_id,
+        source_service="client",
+        target_service=SERVICE_NAME,
+        trace_event="REQUEST_START",
+    ))
 
     order_id = str(uuid.uuid4())[:8]
 
@@ -138,6 +145,16 @@ async def create_order(order: OrderRequest, request: Request):
                 status_code=502,
                 error_message=error_msg,
             ))
+            _fire(log_to_splunk(
+                correlation_id=correlation_id,
+                transaction_id=transaction_id,
+                source_service="client",
+                target_service=SERVICE_NAME,
+                trace_event="REQUEST_ERROR",
+                status_code=502,
+                duration_ms=duration_ms,
+                error_message=error_msg,
+            ))
             raise HTTPException(status_code=502, detail=error_msg)
         except httpx.RequestError as e:
             duration_ms = (time.monotonic() - start_time) * 1000
@@ -163,6 +180,16 @@ async def create_order(order: OrderRequest, request: Request):
                 status_code=503,
                 error_message=error_msg,
             ))
+            _fire(log_to_splunk(
+                correlation_id=correlation_id,
+                transaction_id=transaction_id,
+                source_service="client",
+                target_service=SERVICE_NAME,
+                trace_event="REQUEST_ERROR",
+                status_code=503,
+                duration_ms=duration_ms,
+                error_message=error_msg,
+            ))
             raise HTTPException(status_code=503, detail=error_msg)
 
     duration_ms = (time.monotonic() - start_time) * 1000
@@ -179,6 +206,15 @@ async def create_order(order: OrderRequest, request: Request):
     )
 
     _fire(publish_thread_event(
+        correlation_id=correlation_id,
+        transaction_id=transaction_id,
+        source_service="client",
+        target_service=SERVICE_NAME,
+        trace_event="REQUEST_END",
+        status_code=200,
+        duration_ms=duration_ms,
+    ))
+    _fire(log_to_splunk(
         correlation_id=correlation_id,
         transaction_id=transaction_id,
         source_service="client",

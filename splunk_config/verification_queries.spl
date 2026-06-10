@@ -1,0 +1,28 @@
+# THREAD — Splunk SPL Verification Queries
+# Run these in Splunk Search & Reporting after sending a test order.
+# All field names are camelCase per the ThreadMessage contract.
+#
+# ── Step 2: Verify events from all 3 hops share the same correlationId ───────
+
+index=thread_logs
+| table _time, correlationId, sourceService, targetService, traceEvent, statusCode, durationMs
+| sort by _time asc
+
+# ── Step 5: Confirm failure alert triggers ────────────────────────────────────
+
+index=thread_logs traceEvent=REQUEST_ERROR
+| dedup correlationId
+| table correlationId, sourceService, targetService, errorMessage, _time
+
+# ── All events in last 15 minutes ─────────────────────────────────────────────
+
+index=thread_logs earliest=-15m
+| table _time, correlationId, transactionId, sourceService, targetService,
+        traceEvent, statusCode, durationMs, errorMessage
+| sort by _time asc
+
+# ── Count events per service ──────────────────────────────────────────────────
+
+index=thread_logs earliest=-1h
+| stats count by sourceService, traceEvent
+| sort by sourceService, traceEvent
