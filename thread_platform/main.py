@@ -15,6 +15,7 @@ logger = logging.getLogger("thread-platform")
 
 DB_PATH = os.getenv("SQLITE_DB_PATH", "thread.db")
 THREAD_LOGS_QUEUE = os.getenv("THREAD_LOGS_QUEUE", "thread_logs_queue")
+MAX_RETRIES = 5  # reject to DLQ after this many failed attempts
 
 # Database concurrency lock and persistent connection
 db_lock = threading.Lock()
@@ -132,15 +133,27 @@ async def consumer_loop():
                 
                 async with queue.iterator() as queue_iter:
                     async for message in queue_iter:
+                        # Poison-message protection: track retry count in a header.
+                        retry_count = int(message.headers.get("x-retry-count", 0))
                         try:
-                            # Use requeue=True so it is requeued on failure
-                            async with message.process(requeue=True):
+                            async with message.process(requeue=False):
                                 body_str = message.body.decode()
                                 data = json.loads(body_str)
                                 # Write to DB in a separate thread to avoid blocking loop
                                 await asyncio.to_thread(save_message_to_db, data)
                         except Exception as e:
-                            logger.error(f"Error processing consumer message: {e}")
+                            if retry_count >= MAX_RETRIES:
+                                logger.error(
+                                    f"Message exceeded {MAX_RETRIES} retries — rejecting to DLQ: {e}"
+                                )
+                                await message.reject(requeue=False)
+                            else:
+                                logger.warning(
+                                    f"Error processing message (attempt {retry_count + 1}/{MAX_RETRIES}), requeuing: {e}"
+                                )
+                                updated_headers = dict(message.headers)
+                                updated_headers["x-retry-count"] = retry_count + 1
+                                await message.reject(requeue=True)
         except asyncio.CancelledError:
             logger.info("Consumer loop stopped (cancelled).")
             break
@@ -168,14 +181,16 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     
-    # Close persistent DB connection if open
+    # Close persistent DB connection if open — hold db_lock to avoid race with in-flight writes
     global _db_conn
-    if _db_conn is not None:
-        try:
-            _db_conn.close()
-            logger.info("Closed persistent database connection.")
-        except Exception as e:
-            logger.error(f"Error closing DB connection on shutdown: {e}")
+    with db_lock:
+        if _db_conn is not None:
+            try:
+                _db_conn.close()
+                _db_conn = None
+                logger.info("Closed persistent database connection.")
+            except Exception as e:
+                logger.error(f"Error closing DB connection on shutdown: {e}")
 
 app = FastAPI(title="Thread Platform", lifespan=lifespan)
 

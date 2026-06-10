@@ -40,6 +40,17 @@ app = FastAPI(title="Order Service")
 SERVICE_NAME = "order-service"
 PAYMENT_URL = os.getenv("PAYMENT_SERVICE_URL", "http://localhost:8002")
 
+# Module-level task tracker so fire-and-forget publishes are not GC'd early.
+# Each task removes itself via done-callback when it finishes.
+_publish_tasks: set[asyncio.Task] = set()
+
+def _fire(coro):
+    """Schedule coro as a tracked background task."""
+    task = asyncio.create_task(coro)
+    _publish_tasks.add(task)
+    task.add_done_callback(_publish_tasks.discard)
+    return task
+
 class OrderRequest(BaseModel):
     customer_id: str
     items: list[dict]
@@ -73,7 +84,7 @@ async def create_order(order: OrderRequest, request: Request):
         }
     )
 
-    asyncio.create_task(publish_thread_event(
+    _fire(publish_thread_event(
         correlation_id=correlation_id,
         transaction_id=transaction_id,
         source_service="client",
@@ -117,7 +128,7 @@ async def create_order(order: OrderRequest, request: Request):
                 }
             )
             
-            asyncio.create_task(publish_thread_event(
+            _fire(publish_thread_event(
                 correlation_id=correlation_id,
                 transaction_id=transaction_id,
                 source_service="client",
@@ -142,7 +153,7 @@ async def create_order(order: OrderRequest, request: Request):
                 }
             )
             
-            asyncio.create_task(publish_thread_event(
+            _fire(publish_thread_event(
                 correlation_id=correlation_id,
                 transaction_id=transaction_id,
                 source_service="client",
@@ -167,7 +178,7 @@ async def create_order(order: OrderRequest, request: Request):
         }
     )
 
-    asyncio.create_task(publish_thread_event(
+    _fire(publish_thread_event(
         correlation_id=correlation_id,
         transaction_id=transaction_id,
         source_service="client",

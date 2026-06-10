@@ -5,7 +5,7 @@ import aio_pika
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class TraceEvent(str, Enum):
@@ -28,8 +28,7 @@ class ThreadMessage(BaseModel):
     durationMs:     Optional[float] = None
     errorMessage:   Optional[str]   = None
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 def get_rabbitmq_url() -> str:
