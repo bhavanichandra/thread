@@ -3,7 +3,8 @@ import uuid
 import time
 import asyncio
 import logging
-from fastapi import FastAPI, Request
+import traceback
+from fastapi import FastAPI, Request, BackgroundTasks
 from pydantic import BaseModel
 from thread_publisher import publish_thread_event
 
@@ -47,7 +48,7 @@ async def health():
     return {"status": "ok", "service": SERVICE_NAME}
 
 @app.post("/api/v1/reserve")
-async def reserve_inventory(reserve: ReserveRequest, request: Request):
+async def reserve_inventory(reserve: ReserveRequest, request: Request, background_tasks: BackgroundTasks):
     correlation_id = request.headers.get("x-correlation-id", str(uuid.uuid4()))
     transaction_id = request.headers.get("x-transaction-id", str(uuid.uuid4()))
     start_time = time.monotonic()
@@ -63,7 +64,9 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request):
         }
     )
 
-    asyncio.create_task(publish_thread_event(
+    # Use BackgroundTasks so FastAPI awaits completion before shutdown
+    background_tasks.add_task(
+        publish_thread_event,
         correlation_id=correlation_id,
         transaction_id=transaction_id,
         source_service="payment-service",
@@ -72,36 +75,66 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request):
         method="POST",
         url=str(request.url),
         body=reserve.model_dump(),
-    ))
-
-    # Simulate some inventory check work
-    await asyncio.sleep(0.05)
-
-    duration_ms = (time.monotonic() - start_time) * 1000
-
-    # Log + publish REQUEST_END
-    logging.info("Inventory reservation completed",
-        extra={
-            "correlationId": correlation_id,
-            "transactionId": transaction_id,
-            "sourceService": "payment-service",
-            "targetService": SERVICE_NAME,
-            "traceEvent": "REQUEST_END"
-        }
     )
 
-    asyncio.create_task(publish_thread_event(
-        correlation_id=correlation_id,
-        transaction_id=transaction_id,
-        source_service="payment-service",
-        target_service=SERVICE_NAME,
-        trace_event="REQUEST_END",
-        status_code=200,
-        duration_ms=duration_ms,
-    ))
+    try:
+        # Simulate some inventory check work
+        await asyncio.sleep(0.05)
 
-    return {
-        "reservation_id": f"res_{reserve.order_id}",
-        "status": "reserved",
-        "order_id": reserve.order_id,
-    }
+        duration_ms = (time.monotonic() - start_time) * 1000
+
+        # Log + publish REQUEST_END
+        logging.info("Inventory reservation completed",
+            extra={
+                "correlationId": correlation_id,
+                "transactionId": transaction_id,
+                "sourceService": "payment-service",
+                "targetService": SERVICE_NAME,
+                "traceEvent": "REQUEST_END"
+            }
+        )
+
+        background_tasks.add_task(
+            publish_thread_event,
+            correlation_id=correlation_id,
+            transaction_id=transaction_id,
+            source_service="payment-service",
+            target_service=SERVICE_NAME,
+            trace_event="REQUEST_END",
+            status_code=200,
+            duration_ms=duration_ms,
+        )
+
+        return {
+            "reservation_id": f"res_{reserve.order_id}",
+            "status": "reserved",
+            "order_id": reserve.order_id,
+        }
+
+    except Exception as exc:
+        duration_ms = (time.monotonic() - start_time) * 1000
+        error_msg = f"{type(exc).__name__}: {exc}"
+
+        logging.error("Inventory reservation failed",
+            extra={
+                "correlationId": correlation_id,
+                "transactionId": transaction_id,
+                "sourceService": "payment-service",
+                "targetService": SERVICE_NAME,
+                "traceEvent": "REQUEST_ERROR"
+            },
+            exc_info=True,
+        )
+
+        background_tasks.add_task(
+            publish_thread_event,
+            correlation_id=correlation_id,
+            transaction_id=transaction_id,
+            source_service="payment-service",
+            target_service=SERVICE_NAME,
+            trace_event="REQUEST_ERROR",
+            status_code=500,
+            duration_ms=duration_ms,
+            error_message=error_msg,
+        )
+        raise
