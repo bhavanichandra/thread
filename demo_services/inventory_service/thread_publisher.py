@@ -3,6 +3,34 @@ import json
 import urllib.parse
 import aio_pika
 from datetime import datetime, timezone
+from enum import Enum
+from typing import Optional
+from pydantic import BaseModel
+
+
+class TraceEvent(str, Enum):
+    REQUEST_START = "REQUEST_START"
+    REQUEST_END   = "REQUEST_END"
+    REQUEST_ERROR = "REQUEST_ERROR"
+
+
+class ThreadMessage(BaseModel):
+    correlationId:  str
+    transactionId:  str
+    sourceService:  str
+    targetService:  str
+    traceEvent:     TraceEvent
+    timestamp:      datetime
+    method:         Optional[str]   = None
+    url:            Optional[str]   = None
+    body:           Optional[dict]  = None
+    statusCode:     Optional[int]   = None
+    durationMs:     Optional[float] = None
+    errorMessage:   Optional[str]   = None
+
+    class Config:
+        use_enum_values = True
+
 
 def get_rabbitmq_url() -> str:
     user = os.getenv('RABBITMQ_USER', 'thread')
@@ -10,11 +38,11 @@ def get_rabbitmq_url() -> str:
     host = os.getenv('RABBITMQ_HOST', 'localhost')
     port = os.getenv('RABBITMQ_PORT', '5672')
     vhost = os.getenv('RABBITMQ_VHOST', '/')
-    
+
     # If password exists, URL-encode it to handle special characters
     auth = f"{urllib.parse.quote(user)}:{urllib.parse.quote(password)}" if password else urllib.parse.quote(user)
     vhost_encoded = urllib.parse.quote(vhost, safe='')
-    
+
     return f"amqp://{auth}@{host}:{port}/{vhost_encoded}"
 
 THREAD_LOGS_QUEUE = os.getenv("THREAD_LOGS_QUEUE", "thread_logs_queue")
@@ -33,20 +61,20 @@ async def publish_thread_event(
     error_message: str = None,
 ):
     """Publish a THREAD contract message to RabbitMQ. Fire-and-forget."""
-    msg = {
-        "correlationId": correlation_id,
-        "transactionId": transaction_id,
-        "sourceService": source_service,
-        "targetService": target_service,
-        "traceEvent":    trace_event,
-        "timestamp":     datetime.now(timezone.utc).isoformat(),
-    }
-    if method:        msg["method"]       = method
-    if url:           msg["url"]          = url
-    if body:          msg["body"]         = body
-    if status_code is not None:   msg["statusCode"]   = status_code
-    if duration_ms is not None:   msg["durationMs"]   = duration_ms
-    if error_message: msg["errorMessage"] = error_message
+    msg = ThreadMessage(
+        correlationId=correlation_id,
+        transactionId=transaction_id,
+        sourceService=source_service,
+        targetService=target_service,
+        traceEvent=trace_event,
+        timestamp=datetime.now(timezone.utc),
+        method=method,
+        url=url,
+        body=body,
+        statusCode=status_code,
+        durationMs=duration_ms,
+        errorMessage=error_message,
+    )
 
     rabbitmq_url = get_rabbitmq_url()
     try:
@@ -55,7 +83,7 @@ async def publish_thread_event(
             channel = await connection.channel()
             await channel.default_exchange.publish(
                 aio_pika.Message(
-                    body=json.dumps(msg).encode(),
+                    body=msg.model_dump_json().encode(),
                     delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
                 ),
                 routing_key=THREAD_LOGS_QUEUE,
