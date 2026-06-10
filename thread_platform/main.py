@@ -22,9 +22,10 @@ _db_conn = None
 
 def get_db_conn():
     global _db_conn
-    if _db_conn is None:
-        _db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    return _db_conn
+    with db_lock:
+        if _db_conn is None:
+            _db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        return _db_conn
 
 def init_db():
     """Create the SQLite database, schema, and indexes if they don't exist."""
@@ -106,6 +107,7 @@ def save_message_to_db(data: dict):
             logger.info(f"Saved message from {data.get('sourceService')} to {data.get('targetService')} - event: {data.get('traceEvent')}")
         except Exception as e:
             logger.error(f"Failed to save message to SQLite: {e}")
+            raise e
 
 async def consumer_loop():
     """Background task consuming messages from RabbitMQ and writing them to SQLite."""
@@ -130,14 +132,15 @@ async def consumer_loop():
                 
                 async with queue.iterator() as queue_iter:
                     async for message in queue_iter:
-                        async with message.process():
-                            try:
+                        try:
+                            # Use requeue=True so it is requeued on failure
+                            async with message.process(requeue=True):
                                 body_str = message.body.decode()
                                 data = json.loads(body_str)
                                 # Write to DB in a separate thread to avoid blocking loop
                                 await asyncio.to_thread(save_message_to_db, data)
-                            except Exception as e:
-                                logger.error(f"Error processing consumer message: {e}")
+                        except Exception as e:
+                            logger.error(f"Error processing consumer message: {e}")
         except asyncio.CancelledError:
             logger.info("Consumer loop stopped (cancelled).")
             break
