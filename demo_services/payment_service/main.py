@@ -6,7 +6,7 @@ import logging
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
-from thread_publisher import publish_thread_event
+from thread_publisher import publish_thread_event, log_to_splunk
 
 # Thread Logger custom filter to prevent KeyErrors on default logs
 class ThreadLogFilter(logging.Filter):
@@ -40,6 +40,16 @@ app = FastAPI(title="Payment Service")
 SERVICE_NAME = "payment-service"
 INVENTORY_URL = os.getenv("INVENTORY_SERVICE_URL", "http://localhost:8003")
 
+# Module-level task tracker so fire-and-forget publishes are not GC'd early.
+_publish_tasks: set[asyncio.Task] = set()
+
+def _fire(coro):
+    """Schedule coro as a tracked background task."""
+    task = asyncio.create_task(coro)
+    _publish_tasks.add(task)
+    task.add_done_callback(_publish_tasks.discard)
+    return task
+
 class PaymentRequest(BaseModel):
     order_id: str
     amount: float = Field(gt=0)
@@ -68,7 +78,7 @@ async def process_payment(payment: PaymentRequest, request: Request):
         }
     )
 
-    asyncio.create_task(publish_thread_event(
+    _fire(publish_thread_event(
         correlation_id=correlation_id,
         transaction_id=transaction_id,
         source_service="order-service",
@@ -78,12 +88,19 @@ async def process_payment(payment: PaymentRequest, request: Request):
         url=str(request.url),
         body=payment.model_dump(),
     ))
+    _fire(log_to_splunk(
+        correlation_id=correlation_id,
+        transaction_id=transaction_id,
+        source_service="order-service",
+        target_service=SERVICE_NAME,
+        trace_event="REQUEST_START",
+    ))
 
     # Failure injection
     if os.getenv("SIMULATE_FAILURE", "false").lower() == "true":
         duration_ms = (time.monotonic() - start_time) * 1000
         error_msg = "Payment gateway timeout — simulated failure"
-        
+
         logging.error(error_msg,
             extra={
                 "correlationId": correlation_id,
@@ -93,8 +110,18 @@ async def process_payment(payment: PaymentRequest, request: Request):
                 "traceEvent": "REQUEST_ERROR"
             }
         )
-        
-        asyncio.create_task(publish_thread_event(
+
+        _fire(publish_thread_event(
+            correlation_id=correlation_id,
+            transaction_id=transaction_id,
+            source_service="order-service",
+            target_service=SERVICE_NAME,
+            trace_event="REQUEST_ERROR",
+            status_code=503,
+            duration_ms=duration_ms,
+            error_message=error_msg,
+        ))
+        _fire(log_to_splunk(
             correlation_id=correlation_id,
             transaction_id=transaction_id,
             source_service="order-service",
@@ -121,7 +148,7 @@ async def process_payment(payment: PaymentRequest, request: Request):
         except httpx.HTTPStatusError as e:
             duration_ms = (time.monotonic() - start_time) * 1000
             error_msg = f"Inventory failed: {e.response.text}"
-            
+
             logging.error(f"Inventory reservation failed with status {e.response.status_code}",
                 extra={
                     "correlationId": correlation_id,
@@ -131,8 +158,8 @@ async def process_payment(payment: PaymentRequest, request: Request):
                     "traceEvent": "REQUEST_ERROR"
                 }
             )
-            
-            asyncio.create_task(publish_thread_event(
+
+            _fire(publish_thread_event(
                 correlation_id=correlation_id,
                 transaction_id=transaction_id,
                 source_service="order-service",
@@ -142,11 +169,21 @@ async def process_payment(payment: PaymentRequest, request: Request):
                 status_code=502,
                 error_message=error_msg,
             ))
+            _fire(log_to_splunk(
+                correlation_id=correlation_id,
+                transaction_id=transaction_id,
+                source_service="order-service",
+                target_service=SERVICE_NAME,
+                trace_event="REQUEST_ERROR",
+                status_code=502,
+                duration_ms=duration_ms,
+                error_message=error_msg,
+            ))
             raise HTTPException(status_code=502, detail=error_msg)
         except httpx.RequestError as e:
             duration_ms = (time.monotonic() - start_time) * 1000
             error_msg = f"Inventory unreachable: {str(e)}"
-            
+
             logging.error(error_msg,
                 extra={
                     "correlationId": correlation_id,
@@ -156,8 +193,8 @@ async def process_payment(payment: PaymentRequest, request: Request):
                     "traceEvent": "REQUEST_ERROR"
                 }
             )
-            
-            asyncio.create_task(publish_thread_event(
+
+            _fire(publish_thread_event(
                 correlation_id=correlation_id,
                 transaction_id=transaction_id,
                 source_service="order-service",
@@ -165,6 +202,16 @@ async def process_payment(payment: PaymentRequest, request: Request):
                 trace_event="REQUEST_ERROR",
                 duration_ms=duration_ms,
                 status_code=503,
+                error_message=error_msg,
+            ))
+            _fire(log_to_splunk(
+                correlation_id=correlation_id,
+                transaction_id=transaction_id,
+                source_service="order-service",
+                target_service=SERVICE_NAME,
+                trace_event="REQUEST_ERROR",
+                status_code=503,
+                duration_ms=duration_ms,
                 error_message=error_msg,
             ))
             raise HTTPException(status_code=503, detail=error_msg)
@@ -182,7 +229,16 @@ async def process_payment(payment: PaymentRequest, request: Request):
         }
     )
 
-    asyncio.create_task(publish_thread_event(
+    _fire(publish_thread_event(
+        correlation_id=correlation_id,
+        transaction_id=transaction_id,
+        source_service="order-service",
+        target_service=SERVICE_NAME,
+        trace_event="REQUEST_END",
+        status_code=200,
+        duration_ms=duration_ms,
+    ))
+    _fire(log_to_splunk(
         correlation_id=correlation_id,
         transaction_id=transaction_id,
         source_service="order-service",

@@ -1,7 +1,8 @@
 import os
-import json
+import time as _time
 import urllib.parse
 import aio_pika
+import httpx
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
@@ -30,6 +31,8 @@ class ThreadMessage(BaseModel):
 
     model_config = ConfigDict(use_enum_values=True)
 
+
+# ── RabbitMQ ──────────────────────────────────────────────────────────────────
 
 def get_rabbitmq_url() -> str:
     user = os.getenv('RABBITMQ_USER', 'thread')
@@ -90,3 +93,54 @@ async def publish_thread_event(
     except Exception as e:
         # Never let THREAD publishing break the service
         print(f"[THREAD] Publish failed (non-fatal): {e}")
+
+
+# ── Splunk HEC ────────────────────────────────────────────────────────────────
+
+SPLUNK_HEC_URL   = os.getenv("SPLUNK_HEC_URL", "http://localhost:8088")
+SPLUNK_HEC_TOKEN = os.getenv("SPLUNK_HEC_TOKEN", "")
+SPLUNK_INDEX     = os.getenv("SPLUNK_INDEX", "thread_logs")
+
+async def log_to_splunk(
+    correlation_id: str,
+    transaction_id: str,
+    source_service: str,
+    target_service: str,
+    trace_event: str,
+    status_code: int = None,
+    duration_ms: float = None,
+    error_message: str = None,
+    replay_attempt: int = 0,
+) -> None:
+    """Log structured event to Splunk HEC. Fire-and-forget."""
+    # Normalise trace_event — accept TraceEvent enum or bare string
+    trace_event_str = trace_event.value if hasattr(trace_event, "value") else str(trace_event)
+    ts = datetime.now(timezone.utc).isoformat()
+
+    payload = {
+        "time": _time.time(),
+        "source": "thread",
+        "sourcetype": "thread:transaction",
+        "index": SPLUNK_INDEX,
+        "event": {
+            "correlationId":  correlation_id,
+            "transactionId":  transaction_id,
+            "sourceService":  source_service,
+            "targetService":  target_service,
+            "traceEvent":     trace_event_str,
+            "timestamp":      ts,
+            "statusCode":     status_code,
+            "durationMs":     duration_ms,
+            "errorMessage":   error_message,
+            "replayAttempt":  replay_attempt,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.post(
+                f"{SPLUNK_HEC_URL}/services/collector/event",
+                headers={"Authorization": f"Splunk {SPLUNK_HEC_TOKEN}"},
+                json=payload,
+            )
+    except Exception as e:
+        print(f"[THREAD] HEC log failed (non-fatal): {e}")

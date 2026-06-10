@@ -5,7 +5,8 @@ import asyncio
 import logging
 import threading
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from pydantic import BaseModel
 import aio_pika
 
 from setup_queues import setup_queues, get_rabbitmq_url
@@ -194,6 +195,35 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Thread Platform", lifespan=lifespan)
 
+
+class SplunkAlertPayload(BaseModel):
+    """Webhook payload sent by Splunk when a THREAD failure alert fires."""
+    correlation_id: str = ""
+    service_name:   str = ""
+    error_message:  str = ""
+    timestamp:      str = ""
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "thread-platform"}
+
+
+@app.post("/splunk/alert")
+async def splunk_alert(request: Request):
+    """Receive Splunk failure alert webhook and log for the agentic replay pipeline."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    correlation_id = body.get("correlation_id", "unknown")
+    service_name   = body.get("service_name",   "unknown")
+    error_message  = body.get("error_message",  "unknown")
+    timestamp      = body.get("timestamp",      "")
+
+    logger.warning(
+        f"[THREAD] Failure alert received: correlationId={correlation_id} "
+        f"service={service_name} error={error_message!r} at {timestamp}"
+    )
+    return {"status": "received", "correlation_id": correlation_id}

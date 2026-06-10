@@ -6,7 +6,7 @@ import logging
 import traceback
 from fastapi import FastAPI, Request, BackgroundTasks
 from pydantic import BaseModel
-from thread_publisher import publish_thread_event
+from thread_publisher import publish_thread_event, log_to_splunk
 
 # Thread Logger custom filter to prevent KeyErrors on default logs
 class ThreadLogFilter(logging.Filter):
@@ -76,6 +76,14 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request, backgroun
         url=str(request.url),
         body=reserve.model_dump(),
     )
+    background_tasks.add_task(
+        log_to_splunk,
+        correlation_id=correlation_id,
+        transaction_id=transaction_id,
+        source_service="payment-service",
+        target_service=SERVICE_NAME,
+        trace_event="REQUEST_START",
+    )
 
     try:
         # Simulate some inventory check work
@@ -96,6 +104,16 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request, backgroun
 
         background_tasks.add_task(
             publish_thread_event,
+            correlation_id=correlation_id,
+            transaction_id=transaction_id,
+            source_service="payment-service",
+            target_service=SERVICE_NAME,
+            trace_event="REQUEST_END",
+            status_code=200,
+            duration_ms=duration_ms,
+        )
+        background_tasks.add_task(
+            log_to_splunk,
             correlation_id=correlation_id,
             transaction_id=transaction_id,
             source_service="payment-service",
@@ -128,6 +146,17 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request, backgroun
 
         background_tasks.add_task(
             publish_thread_event,
+            correlation_id=correlation_id,
+            transaction_id=transaction_id,
+            source_service="payment-service",
+            target_service=SERVICE_NAME,
+            trace_event="REQUEST_ERROR",
+            status_code=500,
+            duration_ms=duration_ms,
+            error_message=error_msg,
+        )
+        background_tasks.add_task(
+            log_to_splunk,
             correlation_id=correlation_id,
             transaction_id=transaction_id,
             source_service="payment-service",
