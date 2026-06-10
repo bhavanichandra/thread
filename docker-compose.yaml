@@ -1,108 +1,194 @@
 services:
+  splunk:
+    image: splunk/splunk:latest
+    container_name: thread-splunk
+    hostname: splunk
+    ports:
+      - "8000:8000" # Web UI
+      - "8088:8088" # HEC — services post logs here
+      - "8089:8089" # REST API — MCP Server connects here
+    environment:
+      SPLUNK_START_ARGS: "--accept-license"
+      SPLUNK_GENERAL_TERMS: "--accept-sgt-current-at-splunk-com"
+      SPLUNK_PASSWORD: "${SPLUNK_PASSWORD}"
+      # Pre-configures HEC with your specific token value
+      # Set SPLUNK_HEC_TOKEN in Infisical — any string works
+      SPLUNK_HEC_TOKEN: "${SPLUNK_HEC_TOKEN}"
+    volumes:
+      - splunk_data:/opt/splunk/var
+      - splunk_etc:/opt/splunk/etc
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sf http://localhost:8000 > /dev/null 2>&1" ]
+      interval: 20s
+      timeout: 10s
+      retries: 30
+      start_period: 120s
+  splunk-setup:
+    image: curlimages/curl:latest
+    container_name: thread-splunk-setup
+    depends_on:
+      splunk:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      SPLUNK_PASSWORD: "${SPLUNK_PASSWORD}"
+    entrypoint: >
+      sh -c '
+        echo "[THREAD] Creating thread_logs index...";
+        curl -sf -k \
+          -u "admin:$$SPLUNK_PASSWORD" \
+          -X POST "https://splunk:8089/services/data/indexes" \
+          -d "name=thread_logs" \
+          -d "datatype=event" \
+          -d "output_mode=json" \
+        && echo "[THREAD] thread_logs index created" \
+        || echo "[THREAD] Index may already exist — continuing";
+
+        echo "[THREAD] Disabling SSL and enabling HEC on port 8088...";
+        curl -sf -k \
+          -u "admin:$$SPLUNK_PASSWORD" \
+          -X POST "https://splunk:8089/servicesNS/admin/splunk_httpinput/data/inputs/http/http" \
+          -d "enableSSL=0" \
+          -d "disabled=0" \
+          -d "port=8088" \
+          -d "output_mode=json" \
+        && echo "[THREAD] HEC enabled (SSL off, port 8088)" \
+        || echo "[THREAD] HEC may already be configured — continuing";
+
+        echo "[THREAD] Splunk setup complete.";
+      '
   rabbitmq:
     image: rabbitmq:3.13-management
+    container_name: thread-rabbitmq
     ports:
-      - "5672:5672" # AMQP — services connect here
-      - "15672:15672" # Management UI — http://localhost:15672
+      - "5672:5672" # AMQP
+      - "15672:15672" # Management UI → http://localhost:15672
     environment:
       RABBITMQ_DEFAULT_USER: thread
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASSWORD}"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
       test: [ "CMD", "rabbitmq-diagnostics", "ping" ]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 20s
 
   order-service:
     build: ./demo_services/order_service
+    container_name: thread-order
     ports:
-      - '8001:8001'
+      - "8001:8001"
     environment:
-      - SERVICE_NAME=order-service
-      - 'SPLUNK_HEC_URL=http://host.docker.internal:8088'
-      - 'SPLUNK_HEC_TOKEN=${SPLUNK_HEC_TOKEN}'
-      - SPLUNK_INDEX=thread_logs
-      - 'PAYMENT_SERVICE_URL=http://payment-service:8002'
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_PORT=5672
-      - RABBITMQ_USER=thread
-      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
-      - RABBITMQ_VHOST=${RABBITMQ_VHOST:-/}
-      - THREAD_LOGS_QUEUE=thread_logs_queue
-      - SLACK_MESSAGES_QUEUE=slack_messages_queue
+      SERVICE_NAME: order-service
+      SPLUNK_HEC_URL: http://splunk:8088
+      SPLUNK_HEC_TOKEN: "${SPLUNK_HEC_TOKEN}"
+      SPLUNK_INDEX: thread_logs
+      PAYMENT_SERVICE_URL: http://payment-service:8002
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: thread
+      RABBITMQ_PASSWORD: "${RABBITMQ_PASSWORD}"
+      THREAD_LOGS_QUEUE: thread_logs_queue
     depends_on:
+      splunk:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
 
   payment-service:
     build: ./demo_services/payment_service
+    container_name: thread-payment
     ports:
-      - '8002:8002'
+      - "8002:8002"
     environment:
-      - SERVICE_NAME=payment-service
-      - 'SPLUNK_HEC_URL=http://host.docker.internal:8088'
-      - 'SPLUNK_HEC_TOKEN=${SPLUNK_HEC_TOKEN}'
-      - SPLUNK_INDEX=thread_logs
-      - 'INVENTORY_SERVICE_URL=http://inventory-service:8003'
-      - 'SIMULATE_FAILURE=${SIMULATE_FAILURE:-false}'
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_PORT=5672
-      - RABBITMQ_USER=thread
-      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
-      - RABBITMQ_VHOST=${RABBITMQ_VHOST:-/}
-      - THREAD_LOGS_QUEUE=thread_logs_queue
-      - SLACK_MESSAGES_QUEUE=slack_messages_queue
+      SERVICE_NAME: payment-service
+      SPLUNK_HEC_URL: http://splunk:8088
+      SPLUNK_HEC_TOKEN: "${SPLUNK_HEC_TOKEN}"
+      SPLUNK_INDEX: thread_logs
+      INVENTORY_SERVICE_URL: http://inventory-service:8003
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: thread
+      RABBITMQ_PASSWORD: "${RABBITMQ_PASSWORD}"
+      THREAD_LOGS_QUEUE: thread_logs_queue
+      SIMULATE_FAILURE: "${SIMULATE_FAILURE:-false}"
     depends_on:
+      splunk:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
 
   inventory-service:
     build: ./demo_services/inventory_service
+    container_name: thread-inventory
     ports:
-      - '8003:8003'
+      - "8003:8003"
     environment:
-      - SERVICE_NAME=inventory-service
-      - 'SPLUNK_HEC_URL=http://host.docker.internal:8088'
-      - 'SPLUNK_HEC_TOKEN=${SPLUNK_HEC_TOKEN}'
-      - SPLUNK_INDEX=thread_logs
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_PORT=5672
-      - RABBITMQ_USER=thread
-      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
-      - RABBITMQ_VHOST=${RABBITMQ_VHOST:-/}
-      - THREAD_LOGS_QUEUE=thread_logs_queue
-      - SLACK_MESSAGES_QUEUE=slack_messages_queue
+      SERVICE_NAME: inventory-service
+      SPLUNK_HEC_URL: http://splunk:8088
+      SPLUNK_HEC_TOKEN: "${SPLUNK_HEC_TOKEN}"
+      SPLUNK_INDEX: thread_logs
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: thread
+      RABBITMQ_PASSWORD: "${RABBITMQ_PASSWORD}"
+      THREAD_LOGS_QUEUE: thread_logs_queue
     depends_on:
+      splunk:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
+
   thread-platform:
     build: ./thread_platform
+    container_name: thread-platform
     ports:
-      - '9000:9000'
+      - "9000:9000"
     environment:
-      - 'SPLUNK_HEC_URL=http://host.docker.internal:8088'
-      - SPLUNK_INDEX=thread_logs
-      - 'SPLUNK_MCP_URL=http://host.docker.internal:7700'
-      - 'SPLUNK_BASE_URL=http://host.docker.internal:8000'
-      - SPLUNK_USERNAME=admin
-      - SLACK_SOCKET_MODE=true
-      - 'SLACK_ALERT_CHANNEL=#thread-alerts'
-      - 'ORDER_SERVICE_URL=http://order-service:8001'
-      - PLATFORM_PORT=9000
-      - PLATFORM_ENV=development
-      - 'SPLUNK_HEC_TOKEN=${SPLUNK_HEC_TOKEN}'
-      - 'SPLUNK_MCP_TOKEN=${SPLUNK_MCP_TOKEN}'
-      - 'SPLUNK_PASSWORD=${SPLUNK_PASSWORD}'
-      - 'SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}'
-      - 'SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}'
-      - 'SLACK_APP_TOKEN=${SLACK_APP_TOKEN}'
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_PORT=5672
-      - RABBITMQ_USER=thread
-      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
-      - RABBITMQ_VHOST=${RABBITMQ_VHOST:-/}
-      - THREAD_LOGS_QUEUE=thread_logs_queue
-      - SLACK_MESSAGES_QUEUE=slack_messages_queue
+      # Splunk
+      SPLUNK_HOST: splunk
+      SPLUNK_PORT: 8089
+      SPLUNK_HEC_URL: http://splunk:8088
+      SPLUNK_HEC_TOKEN: "${SPLUNK_HEC_TOKEN}"
+      SPLUNK_INDEX: thread_logs
+      SPLUNK_BASE_URL: http://localhost:8000
+      SPLUNK_MCP_URL: http://splunk-mcp:7700
+      SPLUNK_MCP_TOKEN: "${SPLUNK_MCP_TOKEN}"
+      SPLUNK_USERNAME: admin
+      SPLUNK_PASSWORD: "${SPLUNK_PASSWORD}"
+      # RabbitMQ
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: thread
+      RABBITMQ_PASSWORD: "${RABBITMQ_PASSWORD}"
+      THREAD_LOGS_QUEUE: thread_logs_queue
+      SLACK_MESSAGES_QUEUE: slack_messages_queue
+      # Slack
+      SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN}"
+      SLACK_SIGNING_SECRET: "${SLACK_SIGNING_SECRET}"
+      SLACK_APP_TOKEN: "${SLACK_APP_TOKEN}"
+      SLACK_SOCKET_MODE: "true"
+      SLACK_ALERT_CHANNEL: "#thread-alerts"
+      # Platform
+      PLATFORM_PORT: 9000
+      PLATFORM_ENV: development
+      # Service URLs (for replay)
+      ORDER_SERVICE_URL: http://order-service:8001
+      SQLITE_PATH: /data/thread_store.db
+    volumes:
+      - thread_data:/data # SQLite persistence
     depends_on:
+      splunk:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      splunk-setup:
+        condition: service_completed_successfully
+
+volumes:
+  splunk_data:
+  splunk_etc:
+  rabbitmq_data:
+  thread_data:
