@@ -1,4 +1,18 @@
 services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5672:5672"    # AMQP — services connect here
+      - "15672:15672"  # Management UI — http://localhost:15672
+    environment:
+      RABBITMQ_DEFAULT_USER: thread
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   order-service:
     build: ./demo_services/order_service
     ports:
@@ -9,6 +23,17 @@ services:
       - 'SPLUNK_HEC_TOKEN=${SPLUNK_HEC_TOKEN}'
       - SPLUNK_INDEX=thread_logs
       - 'PAYMENT_SERVICE_URL=http://payment-service:8002'
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=thread
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
+      - RABBITMQ_VHOST=${RABBITMQ_VHOST:-/}
+      - THREAD_LOGS_QUEUE=thread_logs_queue
+      - SLACK_MESSAGES_QUEUE=slack_messages_queue
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
   payment-service:
     build: ./demo_services/payment_service
     ports:
@@ -20,6 +45,17 @@ services:
       - SPLUNK_INDEX=thread_logs
       - 'INVENTORY_SERVICE_URL=http://inventory-service:8003'
       - 'SIMULATE_FAILURE=${SIMULATE_FAILURE:-false}'
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=thread
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
+      - RABBITMQ_VHOST=${RABBITMQ_VHOST:-/}
+      - THREAD_LOGS_QUEUE=thread_logs_queue
+      - SLACK_MESSAGES_QUEUE=slack_messages_queue
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
   inventory-service:
     build: ./demo_services/inventory_service
     ports:
@@ -29,6 +65,17 @@ services:
       - 'SPLUNK_HEC_URL=http://host.docker.internal:8088'
       - 'SPLUNK_HEC_TOKEN=${SPLUNK_HEC_TOKEN}'
       - SPLUNK_INDEX=thread_logs
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=thread
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
+      - RABBITMQ_VHOST=${RABBITMQ_VHOST:-/}
+      - THREAD_LOGS_QUEUE=thread_logs_queue
+      - SLACK_MESSAGES_QUEUE=slack_messages_queue
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
   thread-platform:
     build: ./thread_platform
     ports:
@@ -50,5 +97,16 @@ services:
       - 'SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}'
       - 'SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}'
       - 'SLACK_APP_TOKEN=${SLACK_APP_TOKEN}'
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=thread
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
+      - RABBITMQ_VHOST=${RABBITMQ_VHOST:-/}
+      - THREAD_LOGS_QUEUE=thread_logs_queue
+      - SLACK_MESSAGES_QUEUE=slack_messages_queue
     depends_on:
-      - order-service
+      order-service:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+
