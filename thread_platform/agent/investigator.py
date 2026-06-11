@@ -124,10 +124,13 @@ def heuristic_anomaly(
 async def cisco_dtms_anomaly(
     service_name: str,
     timeseries: list[dict],
-) -> tuple[float, ForecastTrend, Optional[float]]:
+) -> tuple[float, ForecastTrend, Optional[float], str]:
     """
     Calls Cisco Deep Time Series Model via Splunk AI Toolkit.
     Only active when SPLUNK_AI_ENABLED=true (Splunk Cloud trial).
+
+    Returns (anomaly_score, trend, forecast_rate, actual_source) so the caller
+    always knows which backend produced the result even when DTMS falls back.
 
     TODO: Implement when Splunk Cloud trial is available.
     Falls back to heuristic on any error.
@@ -138,7 +141,8 @@ async def cisco_dtms_anomaly(
         raise NotImplementedError("Implement when Splunk Cloud trial is active")
     except Exception as e:
         print(f"[THREAD:DTMS] Unavailable ({e}), falling back to heuristic")
-        return heuristic_anomaly(timeseries)
+        score, trend, forecast = heuristic_anomaly(timeseries)
+        return score, trend, forecast, "heuristic"
 
 
 # ── Main Investigation Agent ──────────────────────────────────────────────────
@@ -175,9 +179,12 @@ class InvestigationAgent:
             except (ValueError, TypeError):
                 http_status = 500
 
-        # prior_attempts derived from chain — no extra query needed
-        prior_attempts = sum(
-            1 for e in chain if int(e.get("replayAttempt", 0) or 0) > 0
+        # replayAttempt is numbered sequentially (0=original, 1=first replay, …).
+        # max() gives the highest attempt seen across all chain rows — correct even
+        # when a single replay produces multiple hop events with the same number.
+        prior_attempts = max(
+            (int(e.get("replayAttempt") or 0) for e in chain),
+            default=0,
         )
 
         # Transaction chain summary
@@ -199,13 +206,15 @@ class InvestigationAgent:
 
         failed_svc_error_rate = health.get("error_rate", 0.0) / 100.0
         total_system_errors   = len(system_errors)
+        # system_errors is a deduped list of failing correlationIds — no total volume
+        # available. Normalise count against 100 as a load proxy (saturates at 1.0).
         system_error_rate     = min(total_system_errors / 100.0, 1.0)
 
         # ── 4. Anomaly detection ──────────────────────────────────────────────
         if SPLUNK_AI_ENABLED:
-            anomaly_score, forecast_trend, forecast_rate = \
+            # cisco_dtms_anomaly returns actual_source so fallback is reflected correctly
+            anomaly_score, forecast_trend, forecast_rate, ai_source = \
                 await cisco_dtms_anomaly(failed_service, timeseries)
-            ai_source = "cisco_dtms"
         else:
             anomaly_score, forecast_trend, forecast_rate = \
                 heuristic_anomaly(timeseries)
