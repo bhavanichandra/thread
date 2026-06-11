@@ -81,7 +81,7 @@ def build_failure_alert_blocks(result: InvestigationResult) -> list[dict]:
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Error Rate*\n`{result.error_rate * 100:.1f}%`",
+                    "text": f"*Error Rate*\n`{result.failed_service_error_rate * 100:.1f}%`",
                 },
             ],
         },
@@ -118,17 +118,21 @@ def build_failure_alert_blocks(result: InvestigationResult) -> list[dict]:
         blocks.append({"type": "divider"})
 
     # ── AI verdict ────────────────────────────────────────────────────────────
+    ai_label = (
+        "Cisco Deep Time Series" if result.ai_source == "cisco_dtms"
+        else "Heuristic (local dev)"
+    )
     blocks.append(
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
                 "text": (
-                    f"*🤖 AI Verdict*\n"
+                    f"*🤖 AI Verdict ({ai_label})*\n"
                     f"Anomaly score: `{result.anomaly_score:.2f}` {_anomaly_bar(result.anomaly_score)}\n"
                     f"Forecast: {trend_emoji} *{result.forecast_trend.value}*\n"
                     f"Replay recommendation: *replay L={result.recommended_limit}*\n"
-                    f"System-wide failures: *{result.total_system_errors}* transactions affected"
+                    f"System-wide failures: *{result.affected_transactions_15m}* transactions affected"
                 ),
             },
         }
