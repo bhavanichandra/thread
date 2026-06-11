@@ -3,43 +3,66 @@ Data models for the THREAD investigation agent.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from typing import Optional
+
 from pydantic import BaseModel
 
 
+class FailureClass(str, Enum):
+    TRANSIENT       = "TRANSIENT"
+    SYSTEMIC_OUTAGE = "SYSTEMIC_OUTAGE"
+    BAD_REQUEST     = "BAD_REQUEST"
+    AUTH_FAILURE    = "AUTH_FAILURE"
+    UNKNOWN         = "UNKNOWN"
+
+
 class ForecastTrend(str, Enum):
-    RECOVERING  = "RECOVERING"
-    STABLE      = "STABLE"
-    DEGRADING   = "DEGRADING"
-    UNKNOWN     = "UNKNOWN"
+    RECOVERING = "RECOVERING"
+    STABLE     = "STABLE"
+    DEGRADING  = "DEGRADING"
+    UNKNOWN    = "UNKNOWN"
 
 
 class InvestigationResult(BaseModel):
-    """Structured output of one MCP-driven investigation run."""
-
     # Input
-    correlation_id:     str
+    correlation_id:             str
+    investigated_at:            datetime
 
-    # What went wrong
-    failed_service:     str
-    http_status:        Optional[int]   = None
-    error_message:      Optional[str]   = None
+    # Transaction chain
+    services_involved:          list[str]
+    total_hops:                 int
+    failed_service:             str
+    failure_point:              str
 
-    # Health metrics
-    error_rate:         float           = 0.0   # 0-1 fraction
-    total_system_errors: int            = 0     # unique failing correlationIds in window
+    # Failure details
+    error_type:                 str
+    error_message:              str
+    http_status:                int
+    failure_class:              FailureClass
 
-    # AI-computed values
-    anomaly_score:      float           = 0.0   # 0-1; higher = more unusual
-    forecast_trend:     ForecastTrend   = ForecastTrend.UNKNOWN
-    recommended_limit:  int             = 3     # replay L parameter
+    # Health context (from MCP queries)
+    failed_service_error_rate:  float           # 0-1 fraction
+    system_error_rate:          float           # 0-1 fraction
+    affected_transactions_15m:  int
+    prior_attempts:             int
 
-    # Chain summary
-    chain_length:       int             = 0     # total events in transaction chain
+    # Anomaly / forecast — Cisco DTMS (cloud) or heuristic fallback (local)
+    anomaly_score:              float
+    forecast_trend:             ForecastTrend
+    forecast_error_rate_15m:    Optional[float] = None
+    ai_source:                  str             = "heuristic"  # "cisco_dtms" | "heuristic"
 
-    # Human-readable MCP trace for Slack (populated by investigator)
-    mcp_trace:          Optional[str]   = None
+    # Replay decision
+    recommended_limit:          int
+    replay_safe:                bool
 
-    # AI-generated dashboard
-    dashboard_url:      Optional[str]   = None
+    # Human-readable MCP trace for Slack
+    mcp_trace:                  Optional[str]   = None
+
+    # AI-generated dashboard URL (BHA-28)
+    dashboard_url:              Optional[str]   = None
+
+    # Optional LLM summary (BHA-40)
+    llm_summary:                Optional[str]   = None

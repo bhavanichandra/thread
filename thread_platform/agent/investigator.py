@@ -2,6 +2,10 @@
 InvestigationAgent — orchestrates the 5 MCP queries, computes anomaly score,
 derives forecast trend, and produces an InvestigationResult.
 
+Two anomaly backends, selected by SPLUNK_AI_ENABLED env flag:
+  - heuristic_anomaly()    — local dev / Docker Splunk (default)
+  - cisco_dtms_anomaly()   — Splunk Cloud trial only (set SPLUNK_AI_ENABLED=true)
+
 Terminal output during a demo:
   [THREAD:MCP] get_transaction_chain(abc-123...)      →   6 results (234ms)
   [THREAD:MCP] get_failure_details(abc-123...)        →   1 results (187ms)
@@ -17,15 +21,127 @@ Terminal output during a demo:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+from datetime import datetime, timezone
 from typing import Optional
 
 from ..splunk.mcp_client import SplunkMCPClient
-from .models import ForecastTrend, InvestigationResult
 from .dashboard_gen import generate_dashboard
+from .models import FailureClass, ForecastTrend, InvestigationResult
 
 logger = logging.getLogger("thread-platform")
 
+SPLUNK_AI_ENABLED = os.getenv("SPLUNK_AI_ENABLED", "false").lower() == "true"
+
+
+# ── Failure classification ────────────────────────────────────────────────────
+
+def classify_failure(
+    error_type: str,
+    http_status: int,
+    system_error_rate: float,
+    failed_service_error_rate: float,
+) -> FailureClass:
+    if http_status in (400, 422):
+        return FailureClass.BAD_REQUEST
+    if http_status in (401, 403):
+        return FailureClass.AUTH_FAILURE
+    if system_error_rate > 0.30 or failed_service_error_rate > 0.50:
+        return FailureClass.SYSTEMIC_OUTAGE
+    transient = {"ConnectionTimeout", "ReadTimeout", "ConnectError", "ServiceUnavailable"}
+    if error_type in transient or http_status == 503:
+        return FailureClass.TRANSIENT
+    return FailureClass.UNKNOWN
+
+
+# ── Dynamic replay limit ──────────────────────────────────────────────────────
+
+def calculate_replay_limit(
+    error_type: str,
+    http_status: int,
+    failed_service_error_rate: float,
+    system_error_rate: float,
+    prior_attempts: int,
+    anomaly_score: float,
+    forecast_trend: ForecastTrend,
+) -> int:
+    if prior_attempts >= 3:
+        return 0
+    if http_status in (400, 422, 401, 403):
+        return 0
+    if system_error_rate > 0.30:
+        return 0
+    if failed_service_error_rate > 0.50:
+        return 0
+    if forecast_trend == ForecastTrend.DEGRADING and anomaly_score > 0.6:
+        return 0
+    transient = {"ConnectionTimeout", "ReadTimeout", "ConnectError", "ServiceUnavailable"}
+    if forecast_trend == ForecastTrend.RECOVERING and anomaly_score < 0.4:
+        if error_type in transient or http_status == 503:
+            return max(0, 3 - prior_attempts)
+    if 500 <= http_status < 600:
+        return max(0, 1 - prior_attempts)
+    return 0
+
+
+# ── Heuristic fallback (local dev / no Splunk Cloud) ─────────────────────────
+
+def heuristic_anomaly(
+    timeseries: list[dict],
+) -> tuple[float, ForecastTrend, Optional[float]]:
+    """
+    Trend analysis on raw error rate timeseries.
+    Used when SPLUNK_AI_ENABLED=false (local Docker Splunk).
+    Returns same shape as cisco_dtms_anomaly.
+    """
+    if not timeseries or len(timeseries) < 2:
+        return 0.0, ForecastTrend.UNKNOWN, None
+
+    rates = [float(r.get("error_rate", 0)) for r in timeseries]
+    current = rates[-1]
+    average = sum(rates) / len(rates)
+
+    anomaly_score = round(min(current / max(average, 0.001), 1.0), 2)
+
+    mid = len(rates) // 2
+    first_half  = sum(rates[:mid]) / max(mid, 1)
+    second_half = sum(rates[mid:]) / max(len(rates) - mid, 1)
+
+    if second_half < first_half * 0.7:
+        trend = ForecastTrend.RECOVERING
+    elif second_half > first_half * 1.3:
+        trend = ForecastTrend.DEGRADING
+    else:
+        trend = ForecastTrend.STABLE
+
+    return anomaly_score, trend, round(second_half, 4)
+
+
+# ── Cisco Deep Time Series Model (Splunk Cloud only) ─────────────────────────
+
+async def cisco_dtms_anomaly(
+    service_name: str,
+    timeseries: list[dict],
+) -> tuple[float, ForecastTrend, Optional[float]]:
+    """
+    Calls Cisco Deep Time Series Model via Splunk AI Toolkit.
+    Only active when SPLUNK_AI_ENABLED=true (Splunk Cloud trial).
+
+    TODO: Implement when Splunk Cloud trial is available.
+    Falls back to heuristic on any error.
+    """
+    try:
+        print(f"[THREAD:DTMS] Querying Cisco DTMS for {service_name}...")
+        # Implement via splunklib when cloud trial is active — see BHA-31
+        raise NotImplementedError("Implement when Splunk Cloud trial is active")
+    except Exception as e:
+        print(f"[THREAD:DTMS] Unavailable ({e}), falling back to heuristic")
+        return heuristic_anomaly(timeseries)
+
+
+# ── Main Investigation Agent ──────────────────────────────────────────────────
 
 class InvestigationAgent:
     """Runs a 5-query MCP investigation for a failed transaction."""
@@ -34,115 +150,130 @@ class InvestigationAgent:
         self._mcp = mcp or SplunkMCPClient()
 
     async def investigate(self, correlation_id: str) -> InvestigationResult:
-        """Run all 5 queries concurrently then synthesise results."""
-        import asyncio
+        """Run 5 MCP queries, compute anomaly, classify failure, derive replay limit."""
 
-        # ── Run all 5 queries concurrently ────────────────────────────────────
-        (
-            chain,
-            failures,
-            system_errors,
-        ) = await asyncio.gather(
+        # ── 1. Concurrent queries (chain + failures + system errors) ──────────
+        chain, failures, system_errors = await asyncio.gather(
             self._mcp.get_transaction_chain(correlation_id),
             self._mcp.get_failure_details(correlation_id),
             self._mcp.get_system_errors(window="-15m"),
         )
 
-        # Determine failed service from first error row
+        # ── 2. Extract failure facts ──────────────────────────────────────────
         failed_service = "unknown"
-        http_status: Optional[int] = None
-        error_message: Optional[str] = None
+        error_type     = "Unknown"
+        error_message  = ""
+        http_status    = 500
+
         if failures:
             row = failures[0]
             failed_service = row.get("sourceService", "unknown")
+            error_message  = row.get("errorMessage", "") or ""
+            error_type     = error_message.split(":")[0].strip() if error_message else "Unknown"
             try:
-                http_status = int(row["statusCode"]) if row.get("statusCode") else None
+                http_status = int(row["statusCode"]) if row.get("statusCode") else 500
             except (ValueError, TypeError):
-                http_status = None
-            error_message = row.get("errorMessage")
+                http_status = 500
 
-        # Fetch service health + timeseries for the identified failed service
+        # prior_attempts derived from chain — no extra query needed
+        prior_attempts = sum(
+            1 for e in chain if int(e.get("replayAttempt", 0) or 0) > 0
+        )
+
+        # Transaction chain summary
+        services = list(dict.fromkeys(
+            e.get("sourceService") for e in chain if e.get("sourceService")
+        ))
+        total_hops = len(services)
+        try:
+            fail_step     = services.index(failed_service) + 1
+            failure_point = f"step {fail_step} of {total_hops}"
+        except ValueError:
+            failure_point = "unknown step"
+
+        # ── 3. Service health + timeseries (sequential — need failed_service) ─
         health, timeseries = await asyncio.gather(
             self._mcp.get_service_health(failed_service, window="-15m"),
             self._mcp.get_error_rate_timeseries(failed_service, window="-1h"),
         )
 
-        # ── Derive metrics ────────────────────────────────────────────────────
-        error_rate_pct: float = health.get("error_rate", 0.0)   # already 0-100
-        error_rate_frac: float = error_rate_pct / 100.0
-        total_system_errors = len(system_errors)
+        failed_svc_error_rate = health.get("error_rate", 0.0) / 100.0
+        total_system_errors   = len(system_errors)
+        system_error_rate     = min(total_system_errors / 100.0, 1.0)
 
-        # Anomaly score: blend error-rate contribution + system-wide spread
-        system_spread = min(total_system_errors / 10.0, 1.0)
-        anomaly_score = round(
-            0.7 * min(error_rate_frac, 1.0) + 0.3 * system_spread,
-            2,
-        )
-
-        # Forecast trend from timeseries: compare last 3 vs first 3 error rates
-        forecast_trend = ForecastTrend.UNKNOWN
-        if len(timeseries) >= 6:
-            try:
-                first3 = [float(r.get("error_rate", 0)) for r in timeseries[:3]]
-                last3  = [float(r.get("error_rate", 0)) for r in timeseries[-3:]]
-                avg_first = sum(first3) / len(first3)
-                avg_last  = sum(last3)  / len(last3)
-                delta = avg_last - avg_first
-                if delta < -2.0:
-                    forecast_trend = ForecastTrend.RECOVERING
-                elif delta > 2.0:
-                    forecast_trend = ForecastTrend.DEGRADING
-                else:
-                    forecast_trend = ForecastTrend.STABLE
-            except Exception:
-                forecast_trend = ForecastTrend.UNKNOWN
-
-        # Replay limit: conservative when anomaly is high or trend degrading
-        if forecast_trend == ForecastTrend.DEGRADING or anomaly_score > 0.6:
-            recommended_limit = 1
-        elif anomaly_score > 0.3:
-            recommended_limit = 2
+        # ── 4. Anomaly detection ──────────────────────────────────────────────
+        if SPLUNK_AI_ENABLED:
+            anomaly_score, forecast_trend, forecast_rate = \
+                await cisco_dtms_anomaly(failed_service, timeseries)
+            ai_source = "cisco_dtms"
         else:
-            recommended_limit = 3
+            anomaly_score, forecast_trend, forecast_rate = \
+                heuristic_anomaly(timeseries)
+            ai_source = "heuristic"
+
+        # ── 5. Classify failure + calculate replay limit ───────────────────────
+        failure_class     = classify_failure(
+            error_type, http_status, system_error_rate, failed_svc_error_rate
+        )
+        recommended_limit = calculate_replay_limit(
+            error_type=error_type,
+            http_status=http_status,
+            failed_service_error_rate=failed_svc_error_rate,
+            system_error_rate=system_error_rate,
+            prior_attempts=prior_attempts,
+            anomaly_score=anomaly_score,
+            forecast_trend=forecast_trend,
+        )
 
         # ── MCP trace string (shown in Slack) ─────────────────────────────────
         mcp_trace = (
             f"• `get_transaction_chain` → {len(chain)} events\n"
-            f"• `get_failure_details` → {failed_service}, HTTP {http_status or 'n/a'}\n"
-            f"• `get_service_health` → error rate {error_rate_pct:.1f}%\n"
+            f"• `get_failure_details` → {failed_service}, HTTP {http_status}\n"
+            f"• `get_service_health` → error rate {failed_svc_error_rate * 100:.1f}%\n"
             f"• `get_system_errors` → {total_system_errors} transactions affected\n"
-            f"• `get_error_rate_timeseries` → {len(timeseries)} data points, trend {forecast_trend.value}"
+            f"• `get_error_rate_timeseries` → {len(timeseries)} data points, "
+            f"trend {forecast_trend.value} [{ai_source}]"
         )
 
         # ── Terminal summary ──────────────────────────────────────────────────
         short_id = correlation_id[:8]
         print(f"[THREAD:MCP] Investigation complete for {short_id}...")
         print(f"[THREAD:MCP]   Failed service:  {failed_service}")
-        print(f"[THREAD:MCP]   Error rate:      {error_rate_pct:.1f}%")
-        print(f"[THREAD:MCP]   Anomaly score:   {anomaly_score:.2f}")
+        print(f"[THREAD:MCP]   Error rate:      {failed_svc_error_rate * 100:.1f}%")
+        print(f"[THREAD:MCP]   Anomaly score:   {anomaly_score:.2f} [{ai_source}]")
         print(f"[THREAD:MCP]   Forecast trend:  {forecast_trend.value}")
         print(f"[THREAD:MCP]   Replay limit L:  {recommended_limit}")
 
-        # ── Generate AI-created dashboard ─────────────────────────────────────
+        # ── Generate AI dashboard ─────────────────────────────────────────────
         dashboard_url = await generate_dashboard(
             correlation_id=correlation_id,
             failed_service=failed_service,
             error_message=error_message or "Unknown error",
-            error_rate_pct=error_rate_pct,
+            error_rate_pct=failed_svc_error_rate * 100,
             anomaly_score=anomaly_score,
         )
 
         return InvestigationResult(
             correlation_id=correlation_id,
+            investigated_at=datetime.now(timezone.utc),
+            services_involved=services,
+            total_hops=total_hops,
             failed_service=failed_service,
-            http_status=http_status,
+            failure_point=failure_point,
+            error_type=error_type,
             error_message=error_message,
-            error_rate=error_rate_frac,
-            total_system_errors=total_system_errors,
+            http_status=http_status,
+            failure_class=failure_class,
+            failed_service_error_rate=failed_svc_error_rate,
+            system_error_rate=system_error_rate,
+            affected_transactions_15m=total_system_errors,
+            prior_attempts=prior_attempts,
             anomaly_score=anomaly_score,
             forecast_trend=forecast_trend,
+            forecast_error_rate_15m=forecast_rate,
+            ai_source=ai_source,
             recommended_limit=recommended_limit,
-            chain_length=len(chain),
+            replay_safe=recommended_limit > 0,
             mcp_trace=mcp_trace,
             dashboard_url=dashboard_url,
         )
