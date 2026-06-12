@@ -31,17 +31,21 @@ def failure_details_query(correlation_id: str) -> str:
 
 
 def service_health_query(service_name: str, window: str = "-15m") -> str:
-    """Error rate and success ratio for a specific sourceService."""
+    """Error rate and success ratio for a specific targetService.
+
+    Uses targetService so results reflect errors hitting the service itself
+    (each service logs events with sourceService=caller, targetService=self).
+    """
     svc = _escape_spl(service_name)
     return (
         f'index=thread_logs earliest={window} '
-        f'sourceService="{svc}" '
+        f'targetService="{svc}" '
         f'traceEvent IN (REQUEST_END, REQUEST_ERROR) '
         f'| eval success=if(traceEvent="REQUEST_END",1,0) '
-        f'| stats sum(success) as ok, count as total by sourceService '
+        f'| stats sum(success) as ok, count as total by targetService '
         f'| eval error_rate=round((total-ok)/total*100,2) '
         f'| eval health_pct=round(ok/total*100,2) '
-        f'| table sourceService, ok, total, error_rate, health_pct'
+        f'| table targetService, ok, total, error_rate, health_pct'
     )
 
 

@@ -122,7 +122,8 @@ class SplunkMCPClient:
                 "error_rate":  float(r.get("error_rate", 0.0)),
                 "health_pct":  float(r.get("health_pct", 100.0)),
             }
-        return {"ok": 0, "total": 0, "error_rate": 0.0, "health_pct": 100.0}
+        # No results — service not seen in logs (treat as unknown, not healthy)
+        return {"ok": 0, "total": 0, "error_rate": 100.0, "health_pct": 0.0}
 
     async def get_system_errors(self, window: str = "-15m") -> list[dict]:
         return await self.search(

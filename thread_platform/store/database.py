@@ -133,10 +133,14 @@ def get_replay_request(correlation_id: str) -> Optional[dict]:
 
         if not row:
             return None
+        try:
+            body = json.loads(row["body"]) if row["body"] else None
+        except (json.JSONDecodeError, TypeError):
+            body = None
         return {
             "method": row["method"],
             "url":    row["url"],
-            "body":   json.loads(row["body"]) if row["body"] else None,
+            "body":   body,
         }
 
 
