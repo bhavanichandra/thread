@@ -40,21 +40,24 @@ async def post_investigation_result(result) -> None:
 
 
 async def _publish_action(action: str, correlation_id: str, response_url: str) -> None:
-    connection = await aio_pika.connect_robust(_rabbitmq_url())
-    async with connection:
-        channel = await connection.channel()
-        await channel.default_exchange.publish(
-            aio_pika.Message(
-                body=json.dumps({
-                    "action":        action,
-                    "correlationId": correlation_id,
-                    "responseUrl":   response_url,
-                    "timestamp":     datetime.now(timezone.utc).isoformat(),
-                }).encode(),
-                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-            ),
-            routing_key=SLACK_MESSAGES_QUEUE,
-        )
+    try:
+        connection = await aio_pika.connect_robust(_rabbitmq_url())
+        async with connection:
+            channel = await connection.channel()
+            await channel.default_exchange.publish(
+                aio_pika.Message(
+                    body=json.dumps({
+                        "action":        action,
+                        "correlationId": correlation_id,
+                        "responseUrl":   response_url,
+                        "timestamp":     datetime.now(timezone.utc).isoformat(),
+                    }).encode(),
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                ),
+                routing_key=SLACK_MESSAGES_QUEUE,
+            )
+    except Exception as e:
+        print(f"[THREAD] _publish_action failed (non-fatal): {e}")
 
 
 @app.action("trigger_replay")

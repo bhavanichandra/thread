@@ -24,13 +24,14 @@ async def start_logs_consumer() -> None:
             async with connection:
                 channel = await connection.channel()
                 await channel.set_qos(prefetch_count=10)
-                queue = await channel.declare_queue(THREAD_LOGS_QUEUE, durable=True)
+                # passive=True avoids redeclaring with mismatched args (setup_queues owns the declaration)
+                queue = await channel.declare_queue(THREAD_LOGS_QUEUE, durable=True, passive=True)
                 print(f"[THREAD] logs_consumer started — listening on {THREAD_LOGS_QUEUE}")
 
                 async with queue.iterator() as q:
                     async for message in q:
-                        async with message.process():
-                            try:
+                        try:
+                            async with message.process():
                                 msg = json.loads(message.body.decode())
                                 await asyncio.to_thread(save_message, msg)
 
@@ -41,9 +42,9 @@ async def start_logs_consumer() -> None:
                                         f"[THREAD] Failure recorded: {correlation_id} "
                                         f"({msg.get('sourceService')} → {msg.get('targetService')})"
                                     )
-
-                            except Exception as e:
-                                print(f"[THREAD] logs_consumer error: {e}")
+                        except Exception as e:
+                            # Exception propagated through message.process() → nack already sent
+                            print(f"[THREAD] logs_consumer error (message nacked): {e}")
 
         except asyncio.CancelledError:
             print("[THREAD] logs_consumer stopped.")

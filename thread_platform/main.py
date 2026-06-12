@@ -19,7 +19,7 @@ _replay_engine       = ReplayEngine()
 async def _cleanup_loop() -> None:
     while True:
         await asyncio.sleep(3600)
-        deleted = cleanup_old_messages(hours=24)
+        deleted = await asyncio.to_thread(cleanup_old_messages, 24)
         print(f"[THREAD] Cleanup: removed {deleted} old messages")
 
 
@@ -54,20 +54,20 @@ async def splunk_alert(request: Request):
     except Exception:
         body = {}
 
-    correlation_id = body.get("correlation_id") or body.get("correlationId", "")
-    service_name   = body.get("service_name",   "unknown")
-    error_message  = body.get("error_message",  "")
+    correlation_id = body.get("correlationId", "")
+    service_name   = body.get("serviceName",   "unknown")
+    error_message  = body.get("errorMessage",  "")
 
     if not correlation_id:
-        return {"status": "ignored", "reason": "no correlation_id"}
+        return {"status": "ignored", "reason": "no correlationId"}
 
     print(
         f"[THREAD] Alert received: correlationId={correlation_id} "
-        f"service={service_name}"
+        f"serviceName={service_name}"
     )
 
     asyncio.create_task(_run_investigation(correlation_id))
-    return {"status": "investigating", "correlation_id": correlation_id}
+    return {"status": "investigating", "correlationId": correlation_id}
 
 
 async def _run_investigation(correlation_id: str) -> None:
@@ -86,7 +86,10 @@ async def trigger_replay(correlation_id: str, request: Request):
     except Exception:
         body = {}
 
-    attempt = int(body.get("attempt", 1))
+    try:
+        attempt = int(body.get("attempt", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="'attempt' must be an integer")
     try:
         result = await _replay_engine.execute(correlation_id, attempt)
         return result.model_dump()

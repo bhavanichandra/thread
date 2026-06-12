@@ -56,7 +56,7 @@ Thread Service consumer ──→ SQLite lookup ──→ re-execute original re
 
 ## The THREAD Contract
 
-Any service in any language participates by including these 5 fields in every log line
+Any service in any language participates by including these fields in every log line
 and every RabbitMQ message:
 
 ```json
@@ -65,11 +65,21 @@ and every RabbitMQ message:
   "transactionId": "def-456",
   "sourceService": "order-service",
   "targetService": "payment-service",
-  "traceEvent":    "REQUEST_START | REQUEST_END | REQUEST_ERROR"
+  "traceEvent":    "REQUEST_START | REQUEST_END | REQUEST_ERROR",
+  "timestamp":     "2026-06-10T10:00:00Z",
+  "replayAttempt": 0,
+
+  // REQUEST_START only — captured for one-click replay:
+  "method":        "POST",
+  "url":           "http://payment-service:8002/api/v1/payments",
+  "body":          { },
+  "statusCode":    null,
+  "durationMs":    null,
+  "errorMessage":  null
 }
 ```
 
-**All SPL field names are camelCase** — `correlationId`, `traceEvent`, `sourceService`, etc.
+**All SPL field names are camelCase** — `correlationId`, `traceEvent`, `sourceService`, `durationMs`, etc.
 
 ---
 

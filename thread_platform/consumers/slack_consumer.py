@@ -29,17 +29,19 @@ async def start_slack_consumer() -> None:
             async with connection:
                 channel = await connection.channel()
                 await channel.set_qos(prefetch_count=5)
-                queue = await channel.declare_queue(SLACK_MESSAGES_QUEUE, durable=True)
+                # passive=True avoids redeclaring with mismatched args (setup_queues owns the declaration)
+                queue = await channel.declare_queue(SLACK_MESSAGES_QUEUE, durable=True, passive=True)
                 print(f"[THREAD] slack_consumer started — listening on {SLACK_MESSAGES_QUEUE}")
 
                 async with queue.iterator() as q:
                     async for message in q:
-                        async with message.process():
-                            try:
+                        try:
+                            async with message.process():
                                 msg = json.loads(message.body.decode())
                                 await _handle_action(msg)
-                            except Exception as e:
-                                print(f"[THREAD] slack_consumer error: {e}")
+                        except Exception as e:
+                            # Exception propagated through message.process() → nack already sent
+                            print(f"[THREAD] slack_consumer error (message nacked): {e}")
 
         except asyncio.CancelledError:
             print("[THREAD] slack_consumer stopped.")
