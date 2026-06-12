@@ -9,4 +9,5 @@ dependencies = [
     "pydantic>=2.9.0",
     "aio_pika>=9.0.0",
     "python-dotenv>=1.0.0",
+    "slack-bolt>=1.18.0",
 ]

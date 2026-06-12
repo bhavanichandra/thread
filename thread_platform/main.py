@@ -1,207 +1,44 @@
-import os
-import json
-import sqlite3
 import asyncio
-import logging
-import threading
+import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
-from pydantic import BaseModel
-import aio_pika
 
-from setup_queues import setup_queues, get_rabbitmq_url
+from fastapi import FastAPI, HTTPException, Request
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("thread-platform")
+from .agent.investigator import InvestigationAgent
+from .consumers.logs_consumer import start_logs_consumer
+from .consumers.slack_consumer import start_slack_consumer
+from .replay.engine import ReplayEngine, ReplayNotFoundError
+from .setup_queues import setup_queues
+from .slack.handler import post_investigation_result, start_slack_socket_mode
+from .store.database import cleanup_old_messages, init_db
 
-DB_PATH = os.getenv("SQLITE_DB_PATH", "thread.db")
-THREAD_LOGS_QUEUE = os.getenv("THREAD_LOGS_QUEUE", "thread_logs_queue")
-MAX_RETRIES = 5  # reject to DLQ after this many failed attempts
+_investigation_agent = InvestigationAgent()
+_replay_engine       = ReplayEngine()
 
-# Database concurrency lock and persistent connection
-db_lock = threading.Lock()
-_db_conn = None
 
-def get_db_conn():
-    global _db_conn
-    with db_lock:
-        if _db_conn is None:
-            _db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        return _db_conn
-
-def init_db():
-    """Create the SQLite database, schema, and indexes if they don't exist."""
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS thread_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                correlationId TEXT NOT NULL,
-                transactionId TEXT NOT NULL,
-                sourceService TEXT NOT NULL,
-                targetService TEXT NOT NULL,
-                traceEvent TEXT NOT NULL,
-                method TEXT,
-                url TEXT,
-                body TEXT,
-                statusCode INTEGER,
-                durationMs REAL,
-                errorMessage TEXT,
-                timestamp TEXT NOT NULL
-            )
-        """)
-        # Indexes for query performance
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_correlationId ON thread_messages (correlationId)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_transactionId ON thread_messages (transactionId)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_sourceService ON thread_messages (sourceService)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_targetService ON thread_messages (targetService)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_timestamp ON thread_messages (timestamp)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_corr_time ON thread_messages (correlationId, timestamp)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_trans_time ON thread_messages (transactionId, timestamp)")
-        
-        conn.commit()
-        logger.info(f"Database initialized at {DB_PATH}. Table thread_messages and indexes are ready.")
-    except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
-        raise e
-    finally:
-        conn.close()
-
-def save_message_to_db(data: dict):
-    """Write log event to SQLite table thread_messages using the shared connection."""
-    body_val = data.get("body")
-    body_serialized = None
-    if body_val is not None:
-        if isinstance(body_val, (dict, list)):
-            try:
-                body_serialized = json.dumps(body_val)
-            except (TypeError, ValueError):
-                body_serialized = str(body_val)
-        else:
-            body_serialized = str(body_val)
-
-    conn = get_db_conn()
-    with db_lock:
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO thread_messages (
-                    correlationId, transactionId, sourceService, targetService,
-                    traceEvent, method, url, body, statusCode, durationMs,
-                    errorMessage, timestamp
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                data.get("correlationId"),
-                data.get("transactionId"),
-                data.get("sourceService"),
-                data.get("targetService"),
-                data.get("traceEvent"),
-                data.get("method"),
-                data.get("url"),
-                body_serialized,
-                data.get("statusCode"),
-                data.get("durationMs"),
-                data.get("errorMessage"),
-                data.get("timestamp")
-            ))
-            conn.commit()
-            logger.info(f"Saved message from {data.get('sourceService')} to {data.get('targetService')} - event: {data.get('traceEvent')}")
-        except Exception as e:
-            logger.error(f"Failed to save message to SQLite: {e}")
-            raise e
-
-async def consumer_loop():
-    """Background task consuming messages from RabbitMQ and writing them to SQLite."""
-    rabbitmq_url = get_rabbitmq_url()
+async def _cleanup_loop() -> None:
     while True:
-        try:
-            logger.info(f"Consumer connecting to RabbitMQ at {rabbitmq_url.split('@')[-1]}...")
-            connection = await aio_pika.connect_robust(rabbitmq_url, timeout=5)
-            async with connection:
-                channel = await connection.channel()
-                # Set prefetch count to 10
-                await channel.set_qos(prefetch_count=10)
-                
-                queue = await channel.declare_queue(
-                    THREAD_LOGS_QUEUE,
-                    durable=True,
-                    arguments={
-                        "x-message-ttl": 86400000,  # 24h TTL in ms
-                    }
-                )
-                logger.info(f"Consumer connected. Subscribed to {THREAD_LOGS_QUEUE}")
-                
-                async with queue.iterator() as queue_iter:
-                    async for message in queue_iter:
-                        # Poison-message protection: track retry count in a header.
-                        retry_count = int(message.headers.get("x-retry-count", 0))
-                        try:
-                            async with message.process(requeue=False):
-                                body_str = message.body.decode()
-                                data = json.loads(body_str)
-                                # Write to DB in a separate thread to avoid blocking loop
-                                await asyncio.to_thread(save_message_to_db, data)
-                        except Exception as e:
-                            if retry_count >= MAX_RETRIES:
-                                logger.error(
-                                    f"Message exceeded {MAX_RETRIES} retries — rejecting to DLQ: {e}"
-                                )
-                                await message.reject(requeue=False)
-                            else:
-                                logger.warning(
-                                    f"Error processing message (attempt {retry_count + 1}/{MAX_RETRIES}), requeuing: {e}"
-                                )
-                                updated_headers = dict(message.headers)
-                                updated_headers["x-retry-count"] = retry_count + 1
-                                await message.reject(requeue=True)
-        except asyncio.CancelledError:
-            logger.info("Consumer loop stopped (cancelled).")
-            break
-        except Exception as e:
-            logger.error(f"Consumer connection lost or error: {e}. Retrying in 5 seconds...")
-            await asyncio.sleep(5)
+        await asyncio.sleep(3600)
+        deleted = await asyncio.to_thread(cleanup_old_messages, 24)
+        print(f"[THREAD] Cleanup: removed {deleted} old messages")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize DB schema and indexes in a background thread to prevent blocking
     await asyncio.to_thread(init_db)
-    
-    # Run setup queues to declare all queues on startup
+    print("[THREAD] SQLite initialised")
+
     await setup_queues()
-    
-    # Start RabbitMQ log consumer as background task
-    consumer_task = asyncio.create_task(consumer_loop())
-    
+
+    asyncio.create_task(start_logs_consumer())
+    asyncio.create_task(start_slack_consumer())
+    asyncio.create_task(start_slack_socket_mode())
+    asyncio.create_task(_cleanup_loop())
+
     yield
-    
-    # Clean up background task on shutdown
-    consumer_task.cancel()
-    try:
-        await consumer_task
-    except asyncio.CancelledError:
-        pass
-    
-    # Close persistent DB connection if open — hold db_lock to avoid race with in-flight writes
-    global _db_conn
-    with db_lock:
-        if _db_conn is not None:
-            try:
-                _db_conn.close()
-                _db_conn = None
-                logger.info("Closed persistent database connection.")
-            except Exception as e:
-                logger.error(f"Error closing DB connection on shutdown: {e}")
-
-app = FastAPI(title="Thread Platform", lifespan=lifespan)
 
 
-class SplunkAlertPayload(BaseModel):
-    """Webhook payload sent by Splunk when a THREAD failure alert fires."""
-    correlation_id: str = ""
-    service_name:   str = ""
-    error_message:  str = ""
-    timestamp:      str = ""
+app = FastAPI(title="THREAD Platform", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -211,19 +48,60 @@ async def health():
 
 @app.post("/splunk/alert")
 async def splunk_alert(request: Request):
-    """Receive Splunk failure alert webhook and log for the agentic replay pipeline."""
+    """Splunk failure alert webhook — triggers investigation and posts to Slack."""
     try:
         body = await request.json()
     except Exception:
         body = {}
 
-    correlation_id = body.get("correlation_id", "unknown")
-    service_name   = body.get("service_name",   "unknown")
-    error_message  = body.get("error_message",  "unknown")
-    timestamp      = body.get("timestamp",      "")
+    correlation_id = body.get("correlationId", "")
+    service_name   = body.get("serviceName",   "unknown")
+    error_message  = body.get("errorMessage",  "")
 
-    logger.warning(
-        f"[THREAD] Failure alert received: correlationId={correlation_id} "
-        f"service={service_name} error={error_message!r} at {timestamp}"
+    if not correlation_id:
+        return {"status": "ignored", "reason": "no correlationId"}
+
+    print(
+        f"[THREAD] Alert received: correlationId={correlation_id} "
+        f"serviceName={service_name}"
     )
-    return {"status": "received", "correlation_id": correlation_id}
+
+    asyncio.create_task(_run_investigation(correlation_id))
+    return {"status": "investigating", "correlationId": correlation_id}
+
+
+async def _run_investigation(correlation_id: str) -> None:
+    try:
+        result = await _investigation_agent.investigate(correlation_id)
+        await post_investigation_result(result)
+    except Exception as e:
+        print(f"[THREAD] Investigation failed for {correlation_id}: {e}")
+
+
+@app.post("/replay/{correlation_id}")
+async def trigger_replay(correlation_id: str, request: Request):
+    """Re-execute the original request stored in SQLite."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    try:
+        attempt = int(body.get("attempt", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="'attempt' must be an integer")
+    try:
+        result = await _replay_engine.execute(correlation_id, attempt)
+        return result.model_dump()
+    except ReplayNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/investigation/{correlation_id}")
+async def run_investigation(correlation_id: str):
+    """Manually trigger an investigation (useful for demos)."""
+    try:
+        result = await _investigation_agent.investigate(correlation_id)
+        return result.model_dump()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

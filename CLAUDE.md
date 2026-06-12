@@ -171,7 +171,7 @@ thread/
 
 ## Environment Variables
 
-### Infisical (6 secrets — never in .env or code)
+### Infisical (7 secrets — never in .env or code)
 ```
 SPLUNK_HEC_TOKEN
 SPLUNK_MCP_TOKEN
