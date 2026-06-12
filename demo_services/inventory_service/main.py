@@ -4,7 +4,7 @@ import time
 import asyncio
 import logging
 import traceback
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from thread_publisher import publish_thread_event, log_to_splunk
 
@@ -39,6 +39,16 @@ logging.getLogger().setLevel(logging.INFO)
 app = FastAPI(title="Inventory Service")
 SERVICE_NAME = "inventory-service"
 
+# Module-level task tracker so fire-and-forget publishes are not GC'd early.
+_publish_tasks: set[asyncio.Task] = set()
+
+def _fire(coro):
+    """Schedule coro as a tracked background task."""
+    task = asyncio.create_task(coro)
+    _publish_tasks.add(task)
+    task.add_done_callback(_publish_tasks.discard)
+    return task
+
 class ReserveRequest(BaseModel):
     order_id: str
     items: list[dict]
@@ -48,7 +58,7 @@ async def health():
     return {"status": "ok", "service": SERVICE_NAME}
 
 @app.post("/api/v1/reserve")
-async def reserve_inventory(reserve: ReserveRequest, request: Request, background_tasks: BackgroundTasks):
+async def reserve_inventory(reserve: ReserveRequest, request: Request):
     correlation_id = request.headers.get("x-correlation-id", str(uuid.uuid4()))
     transaction_id = request.headers.get("x-transaction-id", str(uuid.uuid4()))
     start_time = time.monotonic()
@@ -64,9 +74,7 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request, backgroun
         }
     )
 
-    # Use BackgroundTasks so FastAPI awaits completion before shutdown
-    background_tasks.add_task(
-        publish_thread_event,
+    _fire(publish_thread_event(
         correlation_id=correlation_id,
         transaction_id=transaction_id,
         source_service="payment-service",
@@ -75,15 +83,14 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request, backgroun
         method="POST",
         url=str(request.url),
         body=reserve.model_dump(),
-    )
-    background_tasks.add_task(
-        log_to_splunk,
+    ))
+    _fire(log_to_splunk(
         correlation_id=correlation_id,
         transaction_id=transaction_id,
         source_service="payment-service",
         target_service=SERVICE_NAME,
         trace_event="REQUEST_START",
-    )
+    ))
 
     try:
         # Simulate some inventory check work
@@ -102,8 +109,7 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request, backgroun
             }
         )
 
-        background_tasks.add_task(
-            publish_thread_event,
+        _fire(publish_thread_event(
             correlation_id=correlation_id,
             transaction_id=transaction_id,
             source_service="payment-service",
@@ -111,9 +117,8 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request, backgroun
             trace_event="REQUEST_END",
             status_code=200,
             duration_ms=duration_ms,
-        )
-        background_tasks.add_task(
-            log_to_splunk,
+        ))
+        _fire(log_to_splunk(
             correlation_id=correlation_id,
             transaction_id=transaction_id,
             source_service="payment-service",
@@ -121,7 +126,7 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request, backgroun
             trace_event="REQUEST_END",
             status_code=200,
             duration_ms=duration_ms,
-        )
+        ))
 
         return {
             "reservation_id": f"res_{reserve.order_id}",
@@ -144,8 +149,7 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request, backgroun
             exc_info=True,
         )
 
-        background_tasks.add_task(
-            publish_thread_event,
+        _fire(publish_thread_event(
             correlation_id=correlation_id,
             transaction_id=transaction_id,
             source_service="payment-service",
@@ -154,9 +158,8 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request, backgroun
             status_code=500,
             duration_ms=duration_ms,
             error_message=error_msg,
-        )
-        background_tasks.add_task(
-            log_to_splunk,
+        ))
+        _fire(log_to_splunk(
             correlation_id=correlation_id,
             transaction_id=transaction_id,
             source_service="payment-service",
@@ -165,5 +168,5 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request, backgroun
             status_code=500,
             duration_ms=duration_ms,
             error_message=error_msg,
-        )
+        ))
         raise

@@ -154,7 +154,7 @@ services:
       SPLUNK_HEC_TOKEN: "${SPLUNK_HEC_TOKEN}"
       SPLUNK_INDEX: thread_logs
       SPLUNK_BASE_URL: http://localhost:8000
-      SPLUNK_MCP_URL: http://splunk-mcp:7700
+      SPLUNK_MCP_URL: http://splunk:8089
       SPLUNK_MCP_TOKEN: "${SPLUNK_MCP_TOKEN}"
       SPLUNK_USERNAME: admin
       SPLUNK_PASSWORD: "${SPLUNK_PASSWORD}"

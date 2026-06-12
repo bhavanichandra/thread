@@ -17,6 +17,13 @@ SPLUNK_BASE_URL = os.getenv("SPLUNK_BASE_URL", "http://localhost:8000")
 SPLUNK_INDEX    = os.getenv("SPLUNK_INDEX", "thread_logs")
 
 
+def _escape_mrkdwn(text: str) -> str:
+    """Escape Slack mrkdwn special characters so they render as literals."""
+    for ch in ("*", "_", "`", "~", ">", "|"):
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
 def _splunk_link(correlation_id: str) -> str:
     """Deep-link to the THREAD Transaction Chain saved search filtered by correlationId."""
     query = (
@@ -94,7 +101,7 @@ def build_failure_alert_blocks(result: InvestigationResult) -> list[dict]:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*Error:* {result.error_message}",
+                    "text": f"*Error:* {_escape_mrkdwn(result.error_message)}",
                 },
             }
         )

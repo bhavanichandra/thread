@@ -57,10 +57,11 @@ def _validate_panel_specs(specs: list) -> tuple[bool, list]:
             logger.warning(f"[THREAD:DASHBOARD] Panel {i} unknown viz type: {viz}")
             return False, []
 
-        # Escape title to prevent XML injection, but keep SPL raw for CDATA wrapping
+        # Escape title to prevent XML injection; sanitize CDATA terminator in SPL
+        safe_spl = spl.replace("]]>", "]]]]><![CDATA[>")[:500]
         validated.append({
-            "title": xml_escape(title)[:100],  # Escape and limit title
-            "spl": spl[:500],                   # Raw SPL, will be wrapped in CDATA
+            "title": xml_escape(title)[:100],
+            "spl": safe_spl,
             "viz": viz,
         })
 
@@ -134,12 +135,17 @@ Format response as a JSON array (no markdown, no backticks):
             # Extract the content
             content = data["choices"][0]["message"]["content"].strip()
 
-            # Parse the JSON array (Groq might wrap it in markdown code blocks)
-            if content.startswith("```"):
-                content = content.split("```")[1]
-                if content.startswith("json"):
-                    content = content[4:]
-                content = content.strip()
+            # Strip optional markdown code fences; handle any language tag robustly
+            if "```" in content:
+                parts = content.split("```")
+                if len(parts) >= 2:
+                    inner = parts[1]
+                    lines = inner.split("\n", 1)
+                    first = lines[0].strip()
+                    # Treat as a language tag only if it's short and has no spaces
+                    if first and len(first) <= 20 and " " not in first:
+                        inner = lines[1] if len(lines) > 1 else ""
+                    content = inner.strip()
 
             panels_spec = json.loads(content)
 
