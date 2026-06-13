@@ -57,8 +57,14 @@ def _validate_panel_specs(specs: list) -> tuple[bool, list]:
             logger.warning(f"[THREAD:DASHBOARD] Panel {i} unknown viz type: {viz}")
             return False, []
 
+        if len(spl) > 1000:
+            logger.warning(
+                f"[THREAD:DASHBOARD] Panel {i} SPL too long ({len(spl)} chars), truncating to 1000"
+            )
+            spl = spl[:1000]
+
         # Escape title to prevent XML injection; sanitize CDATA terminator in SPL
-        safe_spl = spl.replace("]]>", "]]]]><![CDATA[>")[:500]
+        safe_spl = spl.replace("]]>", "]]]]><![CDATA[>")
         validated.append({
             "title": xml_escape(title)[:100],
             "spl": safe_spl,

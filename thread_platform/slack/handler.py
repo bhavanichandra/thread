@@ -32,11 +32,14 @@ async def post_investigation_result(result) -> None:
     """Post a Block Kit failure alert to #thread-alerts."""
     from .blocks import build_failure_alert_blocks
     blocks = build_failure_alert_blocks(result)
-    await app.client.chat_postMessage(
-        channel=SLACK_ALERT_CHANNEL,
-        text=f"Transaction failure detected: {result.correlation_id}",
-        blocks=blocks,
-    )
+    try:
+        await app.client.chat_postMessage(
+            channel=SLACK_ALERT_CHANNEL,
+            text=f"Transaction failure detected: {result.correlation_id}",
+            blocks=blocks,
+        )
+    except Exception as e:
+        print(f"[THREAD] Slack alert failed for {result.correlation_id} (non-fatal): {e}")
 
 
 async def _publish_action(action: str, correlation_id: str, response_url: str) -> None:

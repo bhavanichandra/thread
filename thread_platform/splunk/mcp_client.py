@@ -1,17 +1,31 @@
 """
-SplunkMCPClient — executes SPL queries against the Splunk REST API.
+SplunkMCPClient — executes SPL queries via the Splunk MCP Server.
 
-Every query is timed and printed with the [THREAD:MCP] prefix so judges can
-see real MCP activity in the terminal during the demo recording.
+Uses real MCP protocol: SSE transport + JSON-RPC 2.0, calling the
+splunk_run_query tool exposed by the official Splunkbase MCP Server app.
 
-Connection: HTTPS to Splunk REST API on port 8089.
-Auth:       username/password (Basic) — token auth not available on all tiers.
+Every query is timed and printed with the [THREAD:MCP] prefix so judges
+can see real MCP activity in the terminal during the demo recording.
+
+Connection: HTTPS to https://splunk:8089/services/mcp
+Auth:       Bearer encrypted token (SPLUNK_MCP_TOKEN from Infisical)
+Transport:  Server-Sent Events (SSE) + JSON-RPC 2.0
+Tool:       splunk_run_query
 """
 
 import os
+import ssl
 import time as _time
 import logging
-import httpx
+import json
+
+from mcp.client.session import ClientSession
+from mcp.client.sse import sse_client
+
+# Docker Splunk uses a self-signed cert on port 8089. Bypass TLS verification
+# when SPLUNK_MCP_INSECURE=true (always on in docker-compose; never in prod).
+if os.getenv("SPLUNK_MCP_INSECURE", "false").lower() == "true":
+    ssl._create_default_https_context = ssl._create_unverified_context
 
 from .queries import (
     transaction_chain_query,
@@ -23,19 +37,35 @@ from .queries import (
 
 logger = logging.getLogger("thread-platform")
 
-SPLUNK_HOST     = os.getenv("SPLUNK_HOST", "localhost")
-SPLUNK_PORT     = int(os.getenv("SPLUNK_PORT", "8089"))
-SPLUNK_USERNAME = os.getenv("SPLUNK_USERNAME", "admin")
-SPLUNK_PASSWORD = os.getenv("SPLUNK_PASSWORD", "")
-SPLUNK_INDEX    = os.getenv("SPLUNK_INDEX", "thread_logs")
+SPLUNK_MCP_URL   = os.getenv("SPLUNK_MCP_URL", "https://localhost:8089/services/mcp")
+SPLUNK_MCP_TOKEN = os.getenv("SPLUNK_MCP_TOKEN", "")
+SPLUNK_INDEX     = os.getenv("SPLUNK_INDEX", "thread_logs")
+
+
+def _parse_tool_result(response) -> list[dict]:
+    """Extract result rows from an MCP tool call response."""
+    rows: list[dict] = []
+    for item in response.content:
+        text = getattr(item, "text", None)
+        if not text:
+            continue
+        try:
+            data = json.loads(text)
+            if isinstance(data, list):
+                rows.extend(data)
+            elif isinstance(data, dict):
+                rows.append(data)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return rows
 
 
 class SplunkMCPClient:
-    """Thin async client over the Splunk REST search/jobs API."""
+    """Async MCP client for Splunk — real SSE + JSON-RPC 2.0 protocol."""
 
     def __init__(self):
-        self._base = f"https://{SPLUNK_HOST}:{SPLUNK_PORT}"
-        self._auth = (SPLUNK_USERNAME, SPLUNK_PASSWORD)
+        self._url = SPLUNK_MCP_URL
+        self._headers = {"Authorization": f"Bearer {SPLUNK_MCP_TOKEN}"}
 
     # ── core ──────────────────────────────────────────────────────────────────
 
@@ -47,7 +77,7 @@ class SplunkMCPClient:
         max_results: int = 100,
         _label: str = "search",
     ) -> list[dict]:
-        """Run a blocking SPL search and return rows as a list of dicts.
+        """Call splunk_run_query via MCP and return rows as a list of dicts.
 
         Prints [THREAD:MCP] timing so judges see every query fire.
         """
@@ -55,33 +85,19 @@ class SplunkMCPClient:
         results: list[dict] = []
 
         try:
-            async with httpx.AsyncClient(
-                verify=False,          # self-signed cert in Docker
-                timeout=30.0,
-            ) as client:
-                # 1. Submit the search job
-                resp = await client.post(
-                    f"{self._base}/services/search/jobs",
-                    auth=self._auth,
-                    data={
-                        "search":       f"search {spl}",
-                        "earliest_time": earliest,
-                        "latest_time":   latest,
-                        "output_mode":   "json",
-                        "exec_mode":     "blocking",   # wait for results inline
-                    },
-                )
-                resp.raise_for_status()
-                sid = resp.json()["sid"]
-
-                # 2. Fetch results
-                res = await client.get(
-                    f"{self._base}/services/search/jobs/{sid}/results",
-                    auth=self._auth,
-                    params={"output_mode": "json", "count": max_results},
-                )
-                res.raise_for_status()
-                results = res.json().get("results", [])
+            async with sse_client(self._url, headers=self._headers) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    response = await session.call_tool(
+                        "splunk_run_query",
+                        {
+                            "query":        f"search {spl}",
+                            "earliest_time": earliest,
+                            "latest_time":   latest,
+                            "max_count":     max_results,
+                        },
+                    )
+                    results = _parse_tool_result(response)
 
         except Exception as exc:
             logger.warning(f"[THREAD:MCP] {_label} failed: {exc}")
@@ -117,12 +133,12 @@ class SplunkMCPClient:
         if results:
             r = results[0]
             return {
-                "ok":          int(r.get("ok", 0)),
-                "total":       int(r.get("total", 0)),
-                "error_rate":  float(r.get("error_rate", 0.0)),
-                "health_pct":  float(r.get("health_pct", 100.0)),
+                "ok":         int(r.get("ok", 0)),
+                "total":      int(r.get("total", 0)),
+                "error_rate": float(r.get("error_rate", 0.0)),
+                "health_pct": float(r.get("health_pct", 100.0)),
             }
-        return {"ok": 0, "total": 0, "error_rate": 0.0, "health_pct": 100.0}
+        return {"ok": 0, "total": 0, "error_rate": 100.0, "health_pct": 0.0}
 
     async def get_system_errors(self, window: str = "-15m") -> list[dict]:
         return await self.search(

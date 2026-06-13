@@ -171,7 +171,7 @@ class InvestigationAgent:
 
         if failures:
             row = failures[0]
-            failed_service = row.get("sourceService", "unknown")
+            failed_service = row.get("targetService", "unknown")
             error_message  = row.get("errorMessage", "") or ""
             error_type     = error_message.split(":")[0].strip() if error_message else "Unknown"
             try:

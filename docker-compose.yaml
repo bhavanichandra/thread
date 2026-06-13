@@ -154,8 +154,9 @@ services:
       SPLUNK_HEC_TOKEN: "${SPLUNK_HEC_TOKEN}"
       SPLUNK_INDEX: thread_logs
       SPLUNK_BASE_URL: http://localhost:8000
-      SPLUNK_MCP_URL: http://splunk:8089
+      SPLUNK_MCP_URL: https://splunk:8089/services/mcp
       SPLUNK_MCP_TOKEN: "${SPLUNK_MCP_TOKEN}"
+      SPLUNK_MCP_INSECURE: "true"
       SPLUNK_USERNAME: admin
       SPLUNK_PASSWORD: "${SPLUNK_PASSWORD}"
       # RabbitMQ
@@ -174,8 +175,11 @@ services:
       # Platform
       PLATFORM_PORT: 9000
       PLATFORM_ENV: development
-      # Service URLs (for replay)
+      SPLUNK_AI_ENABLED: "false"
+      # Service URLs (for replay SSRF allowlist — all three must be present)
       ORDER_SERVICE_URL: http://order-service:8001
+      PAYMENT_SERVICE_URL: http://payment-service:8002
+      INVENTORY_SERVICE_URL: http://inventory-service:8003
       SQLITE_PATH: /data/thread_store.db
     volumes:
       - thread_data:/data # SQLite persistence
