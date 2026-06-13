@@ -8,7 +8,57 @@ Services publish a 5-field contract to RabbitMQ and log to Splunk. When somethin
 an AI agent investigates via **Splunk MCP Server**, the **Cisco Deep Time Series Model**
 calculates a dynamic replay limit, and one-click recovery lands in Slack — in under 30 seconds.
 
-![Architecture](architecture_diagram.png)
+```mermaid
+graph LR
+    subgraph SVC["🏗️ Demo Services"]
+        OS["📦 Order\n:8001"]
+        PS["💳 Payment\n:8002 ⚡"]
+        IS["🗃️ Inventory\n:8003"]
+    end
+
+    subgraph TP["⚙️ Thread Platform :9000"]
+        IA["🔍 Investigation\nAgent"]
+        RE["🔄 Replay\nEngine"]
+        SH["💬 Slack\nHandler"]
+    end
+
+    RMQ[("🐇 RabbitMQ\nthread_logs_queue\nslack_messages_queue")]
+    DB[("💾 SQLite\n24h TTL")]
+
+    subgraph SPL["🔴 Splunk Stack"]
+        HEC["🔥 HEC :8088"]
+        SE[("Splunk\nEnterprise :8089")]
+        MCP["🔮 MCP Server\nsplunk_run_query"]
+    end
+
+    GROQ["✨ Groq LLM\nDashboard Gen"]
+    SLK["💬 Slack\n#thread-alerts"]
+    OPS["👩‍💻 Ops Team"]
+
+    SVC -->|"publish ThreadMessage"| RMQ
+    SVC -.->|"log JSON"| HEC
+    RMQ -->|"consume"| TP
+    HEC --> SE
+    SE -.->|"webhook REQUEST_ERROR"| IA
+    IA ==>|"5 SPL queries\nSSE · JSON-RPC 2.0"| MCP
+    MCP --> SE
+    IA -.->|"dashboard prompt"| GROQ
+    GROQ -.->|"POST dashboard XML"| SE
+    TP <-->|"store & read"| DB
+    SH -->|"Block Kit alert"| SLK
+    SLK -.->|"replay action"| RE
+    SLK --- OPS
+
+    style SVC fill:#1e3a5f,stroke:#3b82f6,color:#fff
+    style TP fill:#052e16,stroke:#10b981,color:#fff
+    style SPL fill:#1c0500,stroke:#ef4444,color:#fff
+    style RMQ fill:#1c0a00,stroke:#f59e0b,color:#fcd34d
+    style DB fill:#13111c,stroke:#6366f1,color:#a5b4fc
+    style MCP fill:#2e1065,stroke:#a855f7,color:#e9d5ff
+    style GROQ fill:#4a0033,stroke:#ec4899,color:#fbcfe8
+    style SLK fill:#2d0a55,stroke:#7c3aed,color:#ddd6fe
+    style OPS fill:#1e1b4b,stroke:#4f46e5,color:#a5b4fc
+```
 
 ## Demo Video
 
@@ -26,17 +76,45 @@ manually. THREAD automates all three steps.
 
 ## Architecture
 
-```
-Services (any language)
-  ├── log 5-field contract ──→ Splunk HEC      [investigation data]
-  └── publish to RabbitMQ ──→ Thread Service → SQLite  [replay capture]
+```mermaid
+sequenceDiagram
+    participant SVC as 💳 Demo Service
+    participant RMQ as 🐇 RabbitMQ
+    participant HEC as 🔥 Splunk HEC
+    participant SE as 🔴 Splunk Enterprise
+    participant TP as ⚙️ Thread Platform
+    participant MCP as 🔮 Splunk MCP Server
+    participant GROQ as ✨ Groq LLM
+    participant SLK as 💬 Slack
+    participant OPS as 👩‍💻 Ops Team
 
-Splunk detects REQUEST_ERROR ──→ webhook ──→ Thread Service
-Thread Service ──→ Splunk MCP Server (5 queries) + Cisco DTMS ──→ InvestigationResult
-Thread Service ──→ Slack #thread-alerts (Block Kit message + buttons)
+    Note over SVC: REQUEST_ERROR — HTTP 503
+    SVC->>RMQ: publish ThreadMessage (5-field contract)
+    SVC->>HEC: log camelCase JSON event
+    HEC->>SE: ingest → thread_logs index
+    SE-->>TP: webhook (correlationId, sourceService)
+    RMQ->>TP: consume thread_logs_queue
 
-User clicks Replay ──→ Slack handler ack() ──→ slack_messages_queue
-Thread Service consumer ──→ SQLite lookup ──→ re-execute original request
+    rect rgb(46, 16, 101)
+        Note over TP,MCP: 5 SPL queries via MCP · SSE + JSON-RPC 2.0
+        TP->>MCP: splunk_run_query — transaction_chain
+        TP->>MCP: splunk_run_query — failure_details
+        TP->>MCP: splunk_run_query — service_health
+        TP->>MCP: splunk_run_query — system_errors
+        TP->>MCP: splunk_run_query — error_rate_timeseries
+        MCP->>SE: SPL search (thread_logs index)
+    end
+
+    Note over TP: InvestigationResult built<br/>anomaly_score · replay_limit · failure_class
+
+    TP->>GROQ: failure context → 3 dashboard panels
+    GROQ-->>SE: POST dashboard XML (Splunk REST API)
+    TP->>SLK: Block Kit alert + [Replay][AI Dashboard][Splunk][Escalate]
+    SLK->>OPS: notification in #thread-alerts
+    OPS->>SLK: click ▶ Replay
+    SLK-->>TP: action → slack_messages_queue (ack in <3s)
+    Note over TP: Replay Engine<br/>SQLite lookup → re-execute original request
+    TP->>SVC: HTTP re-execute (replayAttempt + 1)
 ```
 
 ### Key Components
