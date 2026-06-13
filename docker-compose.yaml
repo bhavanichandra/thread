@@ -175,6 +175,7 @@ services:
       # Platform
       PLATFORM_PORT: 9000
       PLATFORM_ENV: development
+      SPLUNK_AI_ENABLED: "false"
       # Service URLs (for replay SSRF allowlist — all three must be present)
       ORDER_SERVICE_URL: http://order-service:8001
       PAYMENT_SERVICE_URL: http://payment-service:8002
