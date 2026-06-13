@@ -76,7 +76,7 @@ def build_failure_alert_blocks(result: InvestigationResult) -> list[dict]:
             "fields": [
                 {
                     "type": "mrkdwn",
-                    "text": f"*Correlation ID*\n`{short_id}...`",
+                    "text": f"*Correlation ID*\n`{result.correlation_id}`",
                 },
                 {
                     "type": "mrkdwn",

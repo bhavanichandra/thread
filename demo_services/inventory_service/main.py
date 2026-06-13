@@ -37,7 +37,8 @@ logging.getLogger().handlers = [handler]
 logging.getLogger().setLevel(logging.INFO)
 
 app = FastAPI(title="Inventory Service")
-SERVICE_NAME = "inventory-service"
+SERVICE_NAME    = "inventory-service"
+SERVICE_BASE_URL = os.getenv("SERVICE_BASE_URL", "http://localhost:8003")
 
 # Module-level task tracker so fire-and-forget publishes are not GC'd early.
 _publish_tasks: set[asyncio.Task] = set()
@@ -81,7 +82,7 @@ async def reserve_inventory(reserve: ReserveRequest, request: Request):
         target_service=SERVICE_NAME,
         trace_event="REQUEST_START",
         method="POST",
-        url=str(request.url),
+        url=f"{SERVICE_BASE_URL}{request.url.path}",
         body=reserve.model_dump(),
     ))
     _fire(log_to_splunk(

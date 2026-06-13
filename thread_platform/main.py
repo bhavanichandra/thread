@@ -10,6 +10,7 @@ from .consumers.slack_consumer import start_slack_consumer
 from .replay.engine import ReplayEngine, ReplayNotFoundError
 from .setup_queues import setup_queues
 from .slack.handler import post_investigation_result, start_slack_socket_mode
+from .splunk.mcp_client import SplunkMCPClient
 from .store.database import cleanup_old_messages, init_db
 
 _investigation_agent = InvestigationAgent()
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(start_slack_consumer())
     asyncio.create_task(start_slack_socket_mode())
     asyncio.create_task(_cleanup_loop())
+    asyncio.create_task(SplunkMCPClient().list_tools())
 
     yield
 

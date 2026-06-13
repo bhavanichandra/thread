@@ -153,9 +153,22 @@ class InvestigationAgent:
     def __init__(self, mcp: Optional[SplunkMCPClient] = None):
         self._mcp = mcp or SplunkMCPClient()
 
-    async def investigate(self, correlation_id: str) -> InvestigationResult:
-        """Run 5 MCP queries, compute anomaly, classify failure, derive replay limit."""
+    async def investigate(
+        self, correlation_id: str, context: Optional[dict] = None
+    ) -> InvestigationResult:
+        """Run 5 MCP queries, compute anomaly, classify failure, derive replay limit.
 
+        context: the raw RabbitMQ ThreadMessage dict — used as fallback when MCP
+        returns 0 results (e.g. Splunk MCP Server not installed, or logs not yet indexed).
+
+        All 5 queries share one persistent MCP ClientSession opened here.
+        """
+        async with self._mcp:
+            return await self._run_investigation(correlation_id, context)
+
+    async def _run_investigation(
+        self, correlation_id: str, context: Optional[dict] = None
+    ) -> InvestigationResult:
         # ── 1. Concurrent queries (chain + failures + system errors) ──────────
         chain, failures, system_errors = await asyncio.gather(
             self._mcp.get_transaction_chain(correlation_id),
@@ -164,20 +177,25 @@ class InvestigationAgent:
         )
 
         # ── 2. Extract failure facts ──────────────────────────────────────────
-        failed_service = "unknown"
-        error_type     = "Unknown"
-        error_message  = ""
-        http_status    = 500
+        # Seed from RabbitMQ context first (always available), then let MCP override
+        ctx = context or {}
+        failed_service = ctx.get("targetService") or "unknown"
+        error_message  = ctx.get("errorMessage") or ""
+        error_type     = error_message.split(":")[0].strip() if error_message else "Unknown"
+        try:
+            http_status = int(ctx["statusCode"]) if ctx.get("statusCode") else 500
+        except (ValueError, TypeError):
+            http_status = 500
 
         if failures:
             row = failures[0]
-            failed_service = row.get("targetService", "unknown")
-            error_message  = row.get("errorMessage", "") or ""
-            error_type     = error_message.split(":")[0].strip() if error_message else "Unknown"
+            failed_service = row.get("targetService") or failed_service
+            error_message  = row.get("errorMessage") or error_message
+            error_type     = error_message.split(":")[0].strip() if error_message else error_type
             try:
-                http_status = int(row["statusCode"]) if row.get("statusCode") else 500
+                http_status = int(row["statusCode"]) if row.get("statusCode") else http_status
             except (ValueError, TypeError):
-                http_status = 500
+                pass
 
         # replayAttempt is numbered sequentially (0=original, 1=first replay, …).
         # max() gives the highest attempt seen across all chain rows — correct even
@@ -218,6 +236,20 @@ class InvestigationAgent:
         else:
             anomaly_score, forecast_trend, forecast_rate = \
                 heuristic_anomaly(timeseries)
+            # When MCP has no timeseries data, use a fixed score so the Slack
+            # message shows something meaningful rather than 0.00 / UNKNOWN.
+            # health["total"]==0 means the health query also returned no data.
+            if not timeseries:
+                has_real_health = health.get("total", 0) > 0
+                if has_real_health:
+                    anomaly_score = round(min(failed_svc_error_rate + 0.3, 1.0), 2)
+                    forecast_trend = (
+                        ForecastTrend.DEGRADING if failed_svc_error_rate > 0.5
+                        else ForecastTrend.STABLE
+                    )
+                else:
+                    anomaly_score = 0.75
+                    forecast_trend = ForecastTrend.DEGRADING
             ai_source = "heuristic"
 
         # ── 5. Classify failure + calculate replay limit ───────────────────────

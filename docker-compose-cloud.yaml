@@ -1,62 +1,4 @@
 services:
-  splunk:
-    image: splunk/splunk:latest
-    container_name: thread-splunk
-    hostname: splunk
-    ports:
-      - "8000:8000" # Web UI
-      - "8088:8088" # HEC — services post logs here
-      - "8089:8089" # REST API — MCP Server connects here
-    environment:
-      SPLUNK_START_ARGS: "--accept-license"
-      SPLUNK_GENERAL_TERMS: "--accept-sgt-current-at-splunk-com"
-      SPLUNK_PASSWORD: "${SPLUNK_PASSWORD}"
-      SPLUNK_HEC_TOKEN: "${SPLUNK_HEC_TOKEN}"
-    volumes:
-      - splunk_data:/opt/splunk/var
-      - splunk_etc:/opt/splunk/etc
-    healthcheck:
-      test: [ "CMD-SHELL", "curl -sf http://localhost:8000 > /dev/null 2>&1" ]
-      interval: 20s
-      timeout: 10s
-      retries: 30
-      start_period: 120s
-
-  splunk-setup:
-    image: curlimages/curl:latest
-    container_name: thread-splunk-setup
-    depends_on:
-      splunk:
-        condition: service_healthy
-    restart: "no"
-    environment:
-      SPLUNK_PASSWORD: "${SPLUNK_PASSWORD}"
-    entrypoint: >
-      sh -c '
-        echo "[THREAD] Creating thread_logs index...";
-        curl -sf -k \
-          -u "admin:$$SPLUNK_PASSWORD" \
-          -X POST "https://splunk:8089/services/data/indexes" \
-          -d "name=thread_logs" \
-          -d "datatype=event" \
-          -d "output_mode=json" \
-        && echo "[THREAD] thread_logs index created" \
-        || echo "[THREAD] Index may already exist — continuing";
-
-        echo "[THREAD] Disabling SSL and enabling HEC on port 8088...";
-        curl -sf -k \
-          -u "admin:$$SPLUNK_PASSWORD" \
-          -X POST "https://splunk:8089/servicesNS/admin/splunk_httpinput/data/inputs/http/http" \
-          -d "enableSSL=0" \
-          -d "disabled=0" \
-          -d "port=8088" \
-          -d "output_mode=json" \
-        && echo "[THREAD] HEC enabled (SSL off, port 8088)" \
-        || echo "[THREAD] HEC may already be configured — continuing";
-
-        echo "[THREAD] Splunk setup complete.";
-      '
-
   rabbitmq:
     image: rabbitmq:3.13-management
     container_name: thread-rabbitmq
@@ -83,7 +25,7 @@ services:
     environment:
       SERVICE_NAME: order-service
       SERVICE_BASE_URL: http://order-service:8001
-      SPLUNK_HEC_URL: http://splunk:8088
+      SPLUNK_HEC_URL: https://prd-p-pxen4.splunkcloud.com:8088
       SPLUNK_HEC_TOKEN: "${SPLUNK_HEC_TOKEN}"
       SPLUNK_INDEX: thread_logs
       PAYMENT_SERVICE_URL: http://payment-service:8002
@@ -93,12 +35,8 @@ services:
       RABBITMQ_PASSWORD: "${RABBITMQ_PASSWORD}"
       THREAD_LOGS_QUEUE: thread_logs_queue
     depends_on:
-      splunk:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
-      splunk-setup:
-        condition: service_completed_successfully
 
   payment-service:
     build: ./demo_services/payment_service
@@ -108,7 +46,7 @@ services:
     environment:
       SERVICE_NAME: payment-service
       SERVICE_BASE_URL: http://payment-service:8002
-      SPLUNK_HEC_URL: http://splunk:8088
+      SPLUNK_HEC_URL: https://prd-p-pxen4.splunkcloud.com:8088
       SPLUNK_HEC_TOKEN: "${SPLUNK_HEC_TOKEN}"
       SPLUNK_INDEX: thread_logs
       INVENTORY_SERVICE_URL: http://inventory-service:8003
@@ -119,12 +57,8 @@ services:
       THREAD_LOGS_QUEUE: thread_logs_queue
       SIMULATE_FAILURE: "${SIMULATE_FAILURE:-false}"
     depends_on:
-      splunk:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
-      splunk-setup:
-        condition: service_completed_successfully
 
   inventory-service:
     build: ./demo_services/inventory_service
@@ -134,7 +68,7 @@ services:
     environment:
       SERVICE_NAME: inventory-service
       SERVICE_BASE_URL: http://inventory-service:8003
-      SPLUNK_HEC_URL: http://splunk:8088
+      SPLUNK_HEC_URL: https://prd-p-pxen4.splunkcloud.com:8088
       SPLUNK_HEC_TOKEN: "${SPLUNK_HEC_TOKEN}"
       SPLUNK_INDEX: thread_logs
       RABBITMQ_HOST: rabbitmq
@@ -143,12 +77,8 @@ services:
       RABBITMQ_PASSWORD: "${RABBITMQ_PASSWORD}"
       THREAD_LOGS_QUEUE: thread_logs_queue
     depends_on:
-      splunk:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
-      splunk-setup:
-        condition: service_completed_successfully
 
   thread-platform:
     build:
@@ -158,19 +88,19 @@ services:
     ports:
       - "9000:9000"
     environment:
-      # Splunk (local Docker)
-      SPLUNK_HOST: splunk
+      # Splunk Cloud
+      SPLUNK_HOST: prd-p-pxen4.splunkcloud.com
       SPLUNK_PORT: 8089
-      SPLUNK_HEC_URL: http://splunk:8088
+      SPLUNK_HEC_URL: https://prd-p-pxen4.splunkcloud.com:8088
       SPLUNK_HEC_TOKEN: "${SPLUNK_HEC_TOKEN}"
       SPLUNK_INDEX: thread_logs
-      SPLUNK_BASE_URL: http://localhost:8000
-      SPLUNK_MCP_URL: https://splunk:8089/services/mcp
+      SPLUNK_BASE_URL: https://prd-p-pxen4.splunkcloud.com
+      SPLUNK_MCP_URL: https://prd-p-pxen4.splunkcloud.com/en-US/splunkd/__raw/services/mcp
       SPLUNK_MCP_TOKEN: "${SPLUNK_MCP_TOKEN}"
-      SPLUNK_MCP_INSECURE: "true"
-      SPLUNK_USERNAME: admin
+      SPLUNK_MCP_INSECURE: "false"
+      SPLUNK_USERNAME: sc_admin
       SPLUNK_PASSWORD: "${SPLUNK_PASSWORD}"
-      SPLUNK_AI_ENABLED: "false"
+      SPLUNK_AI_ENABLED: "true"
       # RabbitMQ
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
@@ -186,7 +116,7 @@ services:
       SLACK_ALERT_CHANNEL: "#thread-alerts"
       # Platform
       PLATFORM_PORT: 9000
-      PLATFORM_ENV: development
+      PLATFORM_ENV: production
       PYTHONUNBUFFERED: "1"
       GROQ_API_KEY: "${GROQ_API_KEY}"
       # Service URLs (for replay SSRF allowlist)
@@ -197,15 +127,9 @@ services:
     volumes:
       - thread_data:/data
     depends_on:
-      splunk:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
-      splunk-setup:
-        condition: service_completed_successfully
 
 volumes:
-  splunk_data:
-  splunk_etc:
   rabbitmq_data:
   thread_data:
