@@ -14,12 +14,18 @@ Tool:       splunk_run_query
 """
 
 import os
+import ssl
 import time as _time
 import logging
 import json
 
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
+
+# Docker Splunk uses a self-signed cert on port 8089. Bypass TLS verification
+# when SPLUNK_MCP_INSECURE=true (always on in docker-compose; never in prod).
+if os.getenv("SPLUNK_MCP_INSECURE", "false").lower() == "true":
+    ssl._create_default_https_context = ssl._create_unverified_context
 
 from .queries import (
     transaction_chain_query,
