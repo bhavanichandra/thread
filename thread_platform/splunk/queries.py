@@ -59,11 +59,11 @@ def system_errors_query(window: str = "-15m") -> str:
 
 
 def error_rate_timeseries_query(service_name: str, window: str = "-1h") -> str:
-    """1-minute bucketed error rate timeseries for a service."""
+    """1-minute bucketed error rate timeseries for a targetService."""
     svc = _escape_spl(service_name)
     return (
         f'index=thread_logs earliest={window} '
-        f'sourceService="{svc}" '
+        f'targetService="{svc}" '
         f'traceEvent IN (REQUEST_END, REQUEST_ERROR) '
         f'| timechart span=1m '
         f'  count(eval(traceEvent="REQUEST_ERROR")) as errors, '
