@@ -38,7 +38,8 @@ logging.getLogger().setLevel(logging.INFO)
 
 app = FastAPI(title="Order Service")
 SERVICE_NAME = "order-service"
-PAYMENT_URL = os.getenv("PAYMENT_SERVICE_URL", "http://localhost:8002")
+PAYMENT_URL    = os.getenv("PAYMENT_SERVICE_URL", "http://localhost:8002")
+SERVICE_BASE_URL = os.getenv("SERVICE_BASE_URL", "http://localhost:8001")
 
 # Module-level task tracker so fire-and-forget publishes are not GC'd early.
 # Each task removes itself via done-callback when it finishes.
@@ -91,7 +92,7 @@ async def create_order(order: OrderRequest, request: Request):
         target_service=SERVICE_NAME,
         trace_event="REQUEST_START",
         method="POST",
-        url=str(request.url),
+        url=f"{SERVICE_BASE_URL}{request.url.path}",
         body=order.model_dump(),
     ))
     _fire(log_to_splunk(

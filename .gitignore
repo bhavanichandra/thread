@@ -1,4 +1,5 @@
 .env
+.env.cloud
 __pycache__/
 *.pyc
 *.pyo
@@ -9,3 +10,4 @@ dist/
 venv/
 .DS_Store
 .python-version
+.scratch/

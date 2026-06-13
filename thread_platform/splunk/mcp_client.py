@@ -1,7 +1,7 @@
 """
 SplunkMCPClient — executes SPL queries via the Splunk MCP Server.
 
-Uses real MCP protocol: SSE transport + JSON-RPC 2.0, calling the
+Uses real MCP protocol: Streamable HTTP transport + JSON-RPC 2.0, calling the
 splunk_run_query tool exposed by the official Splunkbase MCP Server app.
 
 Every query is timed and printed with the [THREAD:MCP] prefix so judges
@@ -9,23 +9,18 @@ can see real MCP activity in the terminal during the demo recording.
 
 Connection: HTTPS to https://splunk:8089/services/mcp
 Auth:       Bearer encrypted token (SPLUNK_MCP_TOKEN from Infisical)
-Transport:  Server-Sent Events (SSE) + JSON-RPC 2.0
+Transport:  Streamable HTTP (POST) + JSON-RPC 2.0  ← NOT SSE
 Tool:       splunk_run_query
 """
 
 import os
-import ssl
 import time as _time
 import logging
 import json
 
+import httpx
 from mcp.client.session import ClientSession
-from mcp.client.sse import sse_client
-
-# Docker Splunk uses a self-signed cert on port 8089. Bypass TLS verification
-# when SPLUNK_MCP_INSECURE=true (always on in docker-compose; never in prod).
-if os.getenv("SPLUNK_MCP_INSECURE", "false").lower() == "true":
-    ssl._create_default_https_context = ssl._create_unverified_context
+from mcp.client.streamable_http import streamablehttp_client
 
 from .queries import (
     transaction_chain_query,
@@ -37,9 +32,24 @@ from .queries import (
 
 logger = logging.getLogger("thread-platform")
 
-SPLUNK_MCP_URL   = os.getenv("SPLUNK_MCP_URL", "https://localhost:8089/services/mcp")
-SPLUNK_MCP_TOKEN = os.getenv("SPLUNK_MCP_TOKEN", "")
-SPLUNK_INDEX     = os.getenv("SPLUNK_INDEX", "thread_logs")
+SPLUNK_MCP_URL      = os.getenv("SPLUNK_MCP_URL", "https://localhost:8089/services/mcp")
+SPLUNK_MCP_TOKEN    = os.getenv("SPLUNK_MCP_TOKEN", "")
+SPLUNK_INDEX        = os.getenv("SPLUNK_INDEX", "thread_logs")
+SPLUNK_MCP_INSECURE = os.getenv("SPLUNK_MCP_INSECURE", "false").lower() == "true"
+
+
+def _make_httpx_client(
+    headers: dict | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    """httpx client factory for MCP transport."""
+    return httpx.AsyncClient(
+        headers=headers or {},
+        timeout=timeout or httpx.Timeout(10.0, connect=5.0),
+        auth=auth,
+        verify=not SPLUNK_MCP_INSECURE,
+    )
 
 
 def _parse_tool_result(response) -> list[dict]:
@@ -54,20 +64,132 @@ def _parse_tool_result(response) -> list[dict]:
             if isinstance(data, list):
                 rows.extend(data)
             elif isinstance(data, dict):
-                rows.append(data)
+                # Splunk MCP wraps rows: {"results": [...], "truncated": bool, "total_rows": int}
+                if "results" in data and isinstance(data["results"], list):
+                    rows.extend(data["results"])
+                else:
+                    rows.append(data)
         except (json.JSONDecodeError, TypeError):
             pass
     return rows
 
 
 class SplunkMCPClient:
-    """Async MCP client for Splunk — real SSE + JSON-RPC 2.0 protocol."""
+    """Async MCP client for Splunk — Streamable HTTP transport.
+
+    Use as an async context manager to hold one persistent ClientSession across
+    multiple tool calls (e.g. all 5 investigation queries).  Falls back to a
+    one-shot connection when methods are called without the context manager.
+
+        async with SplunkMCPClient() as mcp:
+            results = await mcp.search(...)   # reuses session
+            more    = await mcp.search(...)   # same connection
+    """
 
     def __init__(self):
         self._url = SPLUNK_MCP_URL
         self._headers = {"Authorization": f"Bearer {SPLUNK_MCP_TOKEN}"}
+        self._session: ClientSession | None = None
+        self._transport_cm = None
+        self._session_cm = None
 
-    # ── core ──────────────────────────────────────────────────────────────────
+    # ── context manager ───────────────────────────────────────────────────────
+
+    async def __aenter__(self) -> "SplunkMCPClient":
+        self._transport_cm = streamablehttp_client(
+            self._url,
+            headers=self._headers,
+            httpx_client_factory=_make_httpx_client,
+        )
+        read, write, _ = await self._transport_cm.__aenter__()
+        self._session_cm = ClientSession(read, write)
+        self._session = await self._session_cm.__aenter__()
+        await self._session.initialize()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self._session_cm:
+            await self._session_cm.__aexit__(exc_type, exc_val, exc_tb)
+        if self._transport_cm:
+            await self._transport_cm.__aexit__(exc_type, exc_val, exc_tb)
+        self._session = None
+        self._session_cm = None
+        self._transport_cm = None
+
+    # ── internal dispatcher ───────────────────────────────────────────────────
+
+    async def _call_tool(self, name: str, args: dict):
+        """Call an MCP tool.  Uses the persistent session when inside the
+        context manager; otherwise opens a one-shot connection."""
+        if self._session:
+            return await self._session.call_tool(name, args)
+        async with streamablehttp_client(
+            self._url,
+            headers=self._headers,
+            httpx_client_factory=_make_httpx_client,
+        ) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                return await session.call_tool(name, args)
+
+    # ── public methods ────────────────────────────────────────────────────────
+
+    async def list_tools(self) -> list[str]:
+        """Print and return all tool names exposed by the Splunk MCP Server."""
+        try:
+            if self._session:
+                result = await self._session.list_tools()
+            else:
+                async with streamablehttp_client(
+                    self._url,
+                    headers=self._headers,
+                    httpx_client_factory=_make_httpx_client,
+                ) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        result = await session.list_tools()
+            names = [t.name for t in result.tools]
+            print(f"[THREAD:MCP] Available tools ({len(names)}): {', '.join(names)}")
+            for t in result.tools:
+                schema = getattr(t, "inputSchema", None) or getattr(t, "input_schema", None)
+                props = (schema or {}).get("properties", {})
+                param_names = list(props.keys())
+                print(f"[THREAD:MCP]   {t.name}({', '.join(param_names)}): {t.description or ''}")
+            return names
+        except Exception as exc:
+            cause = exc
+            if hasattr(exc, "exceptions") and exc.exceptions:
+                cause = exc.exceptions[0]
+            cause = getattr(cause, "__cause__", cause) or cause
+            print(f"[THREAD:MCP] list_tools failed: {type(cause).__name__}: {cause}")
+            return []
+
+    async def generate_spl(self, natural_language: str) -> str:
+        """Call saia_generate_spl to turn plain English into SPL via Splunk AI Assistant."""
+        t0 = _time.monotonic()
+        spl = ""
+        try:
+            response = await self._call_tool("saia_generate_spl", {"query": natural_language})
+            rows = _parse_tool_result(response)
+            if rows:
+                r = rows[0]
+                spl = r.get("spl") or r.get("query") or r.get("result") or str(r)
+            else:
+                for item in response.content:
+                    text = getattr(item, "text", None)
+                    if text:
+                        spl = text.strip()
+                        break
+        except Exception as exc:
+            cause = exc
+            if hasattr(exc, "exceptions") and exc.exceptions:
+                cause = exc.exceptions[0]
+            cause = getattr(cause, "__cause__", cause) or cause
+            print(f"[THREAD:MCP] saia_generate_spl failed: {type(cause).__name__}: {cause}")
+
+        elapsed = (_time.monotonic() - t0) * 1000
+        print(f"[THREAD:MCP] saia_generate_spl                                       → ({elapsed:.0f}ms): {spl[:80]}")
+        return spl
 
     async def search(
         self,
@@ -85,22 +207,22 @@ class SplunkMCPClient:
         results: list[dict] = []
 
         try:
-            async with sse_client(self._url, headers=self._headers) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    response = await session.call_tool(
-                        "splunk_run_query",
-                        {
-                            "query":        f"search {spl}",
-                            "earliest_time": earliest,
-                            "latest_time":   latest,
-                            "max_count":     max_results,
-                        },
-                    )
-                    results = _parse_tool_result(response)
-
+            response = await self._call_tool(
+                "splunk_run_query",
+                {
+                    "query":         f"search {spl}",
+                    "earliest_time": earliest,
+                    "latest_time":   latest,
+                    "row_limit":     max_results,
+                },
+            )
+            results = _parse_tool_result(response)
         except Exception as exc:
-            logger.warning(f"[THREAD:MCP] {_label} failed: {exc}")
+            cause = exc
+            if hasattr(exc, "exceptions") and exc.exceptions:
+                cause = exc.exceptions[0]
+            cause = getattr(cause, "__cause__", cause) or cause
+            print(f"[THREAD:MCP] {_label} failed: {type(cause).__name__}: {cause}")
 
         elapsed = (_time.monotonic() - t0) * 1000
         print(f"[THREAD:MCP] {_label:<55} → {len(results):>3} results ({elapsed:.0f}ms)")

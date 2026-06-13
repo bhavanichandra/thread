@@ -27,19 +27,23 @@ def _rabbitmq_url() -> str:
 
 app = AsyncApp(token=SLACK_BOT_TOKEN, signing_secret=SLACK_SIGNING_SECRET)
 
+from .commands import register_commands  # noqa: E402
+register_commands(app)
+
 
 async def post_investigation_result(result) -> None:
     """Post a Block Kit failure alert to #thread-alerts."""
     from .blocks import build_failure_alert_blocks
     blocks = build_failure_alert_blocks(result)
     try:
-        await app.client.chat_postMessage(
+        resp = await app.client.chat_postMessage(
             channel=SLACK_ALERT_CHANNEL,
             text=f"Transaction failure detected: {result.correlation_id}",
             blocks=blocks,
         )
+        print(f"[THREAD] Slack alert posted for {result.correlation_id} → ts={resp.get('ts')}")
     except Exception as e:
-        print(f"[THREAD] Slack alert failed for {result.correlation_id} (non-fatal): {e}")
+        print(f"[THREAD] Slack alert failed for {result.correlation_id}: {e}")
 
 
 async def _publish_action(action: str, correlation_id: str, response_url: str) -> None:

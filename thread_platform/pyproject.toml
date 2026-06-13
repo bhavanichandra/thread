@@ -10,5 +10,6 @@ dependencies = [
     "aio_pika>=9.0.0",
     "python-dotenv>=1.0.0",
     "slack-bolt>=1.18.0",
+    "aiohttp>=3.9.0",
     "mcp>=1.0.0",
 ]

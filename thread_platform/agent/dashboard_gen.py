@@ -127,7 +127,7 @@ Format response as a JSON array (no markdown, no backticks):
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "mixtral-8x7b-32768",
+                    "model": "llama-3.3-70b-versatile",
                     "messages": [
                         {"role": "user", "content": prompt}
                     ],
@@ -173,7 +173,7 @@ Format response as a JSON array (no markdown, no backticks):
 
     # ── Create dashboard in Splunk via REST API ───────────────────────────────
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 f"https://{SPLUNK_HOST}:{SPLUNK_PORT}/servicesNS/admin/search/data/ui/views",
                 auth=(SPLUNK_USERNAME, SPLUNK_PASSWORD),

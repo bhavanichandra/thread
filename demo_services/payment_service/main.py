@@ -37,8 +37,21 @@ logging.getLogger().handlers = [handler]
 logging.getLogger().setLevel(logging.INFO)
 
 app = FastAPI(title="Payment Service")
-SERVICE_NAME = "payment-service"
-INVENTORY_URL = os.getenv("INVENTORY_SERVICE_URL", "http://localhost:8003")
+SERVICE_NAME     = "payment-service"
+INVENTORY_URL    = os.getenv("INVENTORY_SERVICE_URL", "http://localhost:8003")
+SERVICE_BASE_URL = os.getenv("SERVICE_BASE_URL", "http://localhost:8002")
+
+# In-memory failure toggle — starts from SIMULATE_FAILURE env var
+_simulate_failure: bool = os.getenv("SIMULATE_FAILURE", "false").lower() == "true"
+
+
+@app.post("/admin/toggle-failure")
+async def toggle_failure():
+    global _simulate_failure
+    _simulate_failure = not _simulate_failure
+    state = "ENABLED" if _simulate_failure else "DISABLED"
+    print(f"[THREAD] Failure simulation {state}")
+    return {"simulate_failure": _simulate_failure, "state": state}
 
 # Module-level task tracker so fire-and-forget publishes are not GC'd early.
 _publish_tasks: set[asyncio.Task] = set()
@@ -85,7 +98,7 @@ async def process_payment(payment: PaymentRequest, request: Request):
         target_service=SERVICE_NAME,
         trace_event="REQUEST_START",
         method="POST",
-        url=str(request.url),
+        url=f"{SERVICE_BASE_URL}{request.url.path}",
         body=payment.model_dump(),
     ))
     _fire(log_to_splunk(
@@ -96,8 +109,8 @@ async def process_payment(payment: PaymentRequest, request: Request):
         trace_event="REQUEST_START",
     ))
 
-    # Failure injection
-    if os.getenv("SIMULATE_FAILURE", "false").lower() == "true":
+    # Failure injection — controlled by in-memory toggle or env var at startup
+    if _simulate_failure:
         duration_ms = (time.monotonic() - start_time) * 1000
         error_msg = "Payment gateway timeout — simulated failure"
 
