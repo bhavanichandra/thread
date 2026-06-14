@@ -1,4 +1,5 @@
 # THREAD
+
 ### Traceable Header Relay, Execution Audit & Distributed-recovery
 
 > Built for the Splunk Agentic Ops Hackathon 2026 — Observability Track
@@ -8,56 +9,7 @@ Services publish a 5-field contract to RabbitMQ and log to Splunk. When somethin
 an AI agent investigates via **Splunk MCP Server**, the **Cisco Deep Time Series Model**
 calculates a dynamic replay limit, and one-click recovery lands in Slack — in under 30 seconds.
 
-```mermaid
-graph LR
-    subgraph SVC["🏗️ Demo Services"]
-        OS["📦 Order\n:8001"]
-        PS["💳 Payment\n:8002 ⚡"]
-        IS["🗃️ Inventory\n:8003"]
-    end
-
-    subgraph TP["⚙️ Thread Platform :9000"]
-        IA["🔍 Investigation\nAgent"]
-        RE["🔄 Replay\nEngine"]
-        SH["💬 Slack\nHandler"]
-    end
-
-    RMQ[("🐇 RabbitMQ\nthread_logs_queue\nslack_messages_queue")]
-    DB[("💾 SQLite\n24h TTL")]
-
-    subgraph SPL["🔴 Splunk Stack"]
-        HEC["🔥 HEC :8088"]
-        SE[("Splunk\nEnterprise :8089")]
-        MCP["🔮 MCP Server\nsplunk_run_query"]
-    end
-
-    GROQ["✨ Groq LLM\nSPL generation"]
-    SLK["💬 Slack\n#thread-alerts"]
-    OPS["👩‍💻 Ops Team"]
-
-    SVC -->|"publish ThreadMessage"| RMQ
-    SVC -.->|"log JSON"| HEC
-    RMQ -->|"consume"| TP
-    HEC --> SE
-    SE -.->|"webhook REQUEST_ERROR"| IA
-    IA ==>|"6 MCP calls\nSSE · JSON-RPC 2.0"| MCP
-    MCP --> SE
-    IA -.->|"/thread-search SPL fallback"| GROQ
-    TP <-->|"store & read"| DB
-    SH -->|"Block Kit alert"| SLK
-    SLK -.->|"replay action"| RE
-    SLK --- OPS
-
-    style SVC fill:#1e3a5f,stroke:#3b82f6,color:#fff
-    style TP fill:#052e16,stroke:#10b981,color:#fff
-    style SPL fill:#1c0500,stroke:#ef4444,color:#fff
-    style RMQ fill:#1c0a00,stroke:#f59e0b,color:#fcd34d
-    style DB fill:#13111c,stroke:#6366f1,color:#a5b4fc
-    style MCP fill:#2e1065,stroke:#a855f7,color:#e9d5ff
-    style GROQ fill:#4a0033,stroke:#ec4899,color:#fbcfe8
-    style SLK fill:#2d0a55,stroke:#7c3aed,color:#ddd6fe
-    style OPS fill:#1e1b4b,stroke:#4f46e5,color:#a5b4fc
-```
+![High Level Architecture](./high-level-architecture.svg)
 
 ## Demo Video
 
@@ -216,6 +168,7 @@ infisical run -- docker-compose up --build
 ```
 
 Services start on:
+
 - Order service: `http://localhost:8001`
 - Payment service: `http://localhost:8002`
 - Inventory service: `http://localhost:8003`
@@ -226,6 +179,7 @@ Services start on:
 ### 5. Configure Splunk alert
 
 In Splunk Web (`http://localhost:8000`), create a real-time alert:
+
 - Search: `index=thread_logs traceEvent=REQUEST_ERROR | dedup correlationId`
 - Action: Webhook → `http://thread-platform:9000/splunk/alert`
 
