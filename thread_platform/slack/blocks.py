@@ -150,17 +150,6 @@ def build_failure_alert_blocks(result: InvestigationResult) -> list[dict]:
         },
     ]
 
-    # Add AI-generated search button if available
-    if result.dashboard_url:
-        actions.insert(
-            1,
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "🤖 AI Analysis", "emoji": True},
-                "url": result.dashboard_url,
-            },
-        )
-
     if result.recommended_limit > 0:
         actions.append({
             "type": "button",
