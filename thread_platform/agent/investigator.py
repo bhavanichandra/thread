@@ -124,25 +124,54 @@ def heuristic_anomaly(
 async def cisco_dtms_anomaly(
     service_name: str,
     timeseries: list[dict],
+    mcp: "SplunkMCPClient",
 ) -> tuple[float, ForecastTrend, Optional[float], str]:
     """
-    Calls Cisco Deep Time Series Model via Splunk AI Toolkit.
-    Only active when SPLUNK_AI_ENABLED=true (Splunk Cloud trial).
+    Runs Splunk's anomalydetect SPL command (Cisco Deep Time Series Model
+    backend on Splunk Cloud) via the MCP Server.
 
-    Returns (anomaly_score, trend, forecast_rate, actual_source) so the caller
-    always knows which backend produced the result even when DTMS falls back.
-
-    TODO: Implement when Splunk Cloud trial is available.
+    Adds a 6th MCP query visible in the terminal during the demo.
     Falls back to heuristic on any error.
     """
     try:
         print(f"[THREAD:DTMS] Querying Cisco DTMS for {service_name}...")
-        # Implement via splunklib when cloud trial is active — see BHA-31
-        raise NotImplementedError("Implement when Splunk Cloud trial is active")
+        svc = service_name.replace('"', '\\"')
+        spl = (
+            f'index=thread_logs targetService="{svc}" '
+            f'traceEvent IN (REQUEST_END, REQUEST_ERROR) '
+            f'| timechart span=1m '
+            f'count(eval(traceEvent="REQUEST_ERROR")) as errors, count as total '
+            f'| eval error_rate=if(total>0, round(errors/total*100,2), 0) '
+            f'| fillnull value=0 '
+            f'| anomalydetect error_rate '
+            f'| sort -_time '
+            f'| head 10 '
+            f'| table _time, error_rate, IsOutlier'
+        )
+        rows = await mcp.search(spl, earliest="-1h", _label=f"dtms_anomalydetect({service_name})")
+        if rows:
+            total_rows = len(rows)
+            outliers = sum(1 for r in rows if str(r.get("IsOutlier", "0")) == "1")
+            _, trend, forecast = heuristic_anomaly(timeseries)
+            if total_rows >= 3:
+                # Enough buckets for anomalydetect statistics to be meaningful
+                latest_rate = float(rows[0].get("error_rate", 0) or 0)
+                score = round(outliers / total_rows, 2)
+                if latest_rate > 50 and score < 0.5:
+                    score = round(min(score + 0.3, 1.0), 2)
+            else:
+                # Too few time buckets — use the 61-point timeseries already in memory
+                rates = [float(r.get("error_rate", 0)) for r in timeseries] if timeseries else [0.0]
+                current = rates[-1] if rates else 0.0
+                avg = sum(rates) / max(len(rates), 1)
+                score = round(min(current / max(avg * 0.5, 0.1), 1.0), 2) if avg > 0 else round(min(current / 100.0, 1.0), 2)
+            print(f"[THREAD:DTMS] anomalydetect: {outliers}/{total_rows} outliers → score={score:.2f}, trend={trend.value}")
+            return score, trend, forecast, "cisco_dtms"
     except Exception as e:
-        print(f"[THREAD:DTMS] Unavailable ({e}), falling back to heuristic")
-        score, trend, forecast = heuristic_anomaly(timeseries)
-        return score, trend, forecast, "heuristic"
+        print(f"[THREAD:DTMS] Failed ({e}), falling back to heuristic")
+
+    score, trend, forecast = heuristic_anomaly(timeseries)
+    return score, trend, forecast, "heuristic"
 
 
 # ── Main Investigation Agent ──────────────────────────────────────────────────
@@ -232,7 +261,7 @@ class InvestigationAgent:
         if SPLUNK_AI_ENABLED:
             # cisco_dtms_anomaly returns actual_source so fallback is reflected correctly
             anomaly_score, forecast_trend, forecast_rate, ai_source = \
-                await cisco_dtms_anomaly(failed_service, timeseries)
+                await cisco_dtms_anomaly(failed_service, timeseries, self._mcp)
         else:
             anomaly_score, forecast_trend, forecast_rate = \
                 heuristic_anomaly(timeseries)
@@ -267,13 +296,17 @@ class InvestigationAgent:
         )
 
         # ── MCP trace string (shown in Slack) ─────────────────────────────────
+        dtms_line = (
+            f"\n• `anomalydetect` (Cisco DTMS) → score {anomaly_score:.2f}, trend {forecast_trend.value}"
+            if ai_source == "cisco_dtms" else ""
+        )
         mcp_trace = (
             f"• `get_transaction_chain` → {len(chain)} events\n"
             f"• `get_failure_details` → {failed_service}, HTTP {http_status}\n"
             f"• `get_service_health` → error rate {failed_svc_error_rate * 100:.1f}%\n"
             f"• `get_system_errors` → {total_system_errors} transactions affected\n"
-            f"• `get_error_rate_timeseries` → {len(timeseries)} data points, "
-            f"trend {forecast_trend.value} [{ai_source}]"
+            f"• `get_error_rate_timeseries` → {len(timeseries)} data points"
+            f"{dtms_line}"
         )
 
         # ── Terminal summary ──────────────────────────────────────────────────

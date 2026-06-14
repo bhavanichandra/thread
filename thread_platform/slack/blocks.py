@@ -46,11 +46,6 @@ def _trend_emoji(trend: ForecastTrend) -> str:
     }.get(trend, "❓")
 
 
-def _anomaly_bar(score: float) -> str:
-    """Visual 5-block bar representing anomaly score 0-1."""
-    filled = round(score * 5)
-    return "█" * filled + "░" * (5 - filled)
-
 
 def build_failure_alert_blocks(result: InvestigationResult) -> list[dict]:
     """Return Slack Block Kit blocks for a THREAD failure alert."""
@@ -116,7 +111,7 @@ def build_failure_alert_blocks(result: InvestigationResult) -> list[dict]:
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        f"*🔍 Splunk MCP Investigation*\n"
+                        f"*Splunk MCP Investigation*\n"
                         f"{result.mcp_trace}"
                     ),
                 },
@@ -135,10 +130,10 @@ def build_failure_alert_blocks(result: InvestigationResult) -> list[dict]:
             "text": {
                 "type": "mrkdwn",
                 "text": (
-                    f"*🤖 AI Verdict ({ai_label})*\n"
-                    f"Anomaly score: `{result.anomaly_score:.2f}` {_anomaly_bar(result.anomaly_score)}\n"
+                    f"*AI Verdict — {ai_label}*\n"
+                    f"Anomaly score: `{result.anomaly_score:.2f}`\n"
                     f"Forecast: {trend_emoji} *{result.forecast_trend.value}*\n"
-                    f"Replay recommendation: *replay L={result.recommended_limit}*\n"
+                    f"Replay: *{'safe — L=' + str(result.recommended_limit) if result.recommended_limit > 0 else 'not recommended'}*\n"
                     f"System-wide failures: *{result.affected_transactions_15m}* transactions affected"
                 ),
             },
@@ -166,15 +161,21 @@ def build_failure_alert_blocks(result: InvestigationResult) -> list[dict]:
             },
         )
 
-    actions.append(
-        {
+    if result.recommended_limit > 0:
+        actions.append({
             "type": "button",
             "text": {"type": "plain_text", "text": f"🔁 Replay (L={result.recommended_limit})", "emoji": True},
             "action_id": "trigger_replay",
             "value": f"{result.correlation_id}:{result.recommended_limit}",
             "style": "danger",
-        }
-    )
+        })
+    else:
+        actions.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "↩ Replay anyway", "emoji": True},
+            "action_id": "trigger_replay",
+            "value": f"{result.correlation_id}:0",
+        })
 
     blocks.append({"type": "actions", "elements": actions})
 

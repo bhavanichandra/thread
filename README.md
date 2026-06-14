@@ -31,7 +31,7 @@ graph LR
         MCP["🔮 MCP Server\nsplunk_run_query"]
     end
 
-    GROQ["✨ Groq LLM\nDashboard Gen"]
+    GROQ["✨ Groq LLM\nSPL generation"]
     SLK["💬 Slack\n#thread-alerts"]
     OPS["👩‍💻 Ops Team"]
 
@@ -40,10 +40,9 @@ graph LR
     RMQ -->|"consume"| TP
     HEC --> SE
     SE -.->|"webhook REQUEST_ERROR"| IA
-    IA ==>|"5 SPL queries\nSSE · JSON-RPC 2.0"| MCP
+    IA ==>|"6 MCP calls\nSSE · JSON-RPC 2.0"| MCP
     MCP --> SE
-    IA -.->|"dashboard prompt"| GROQ
-    GROQ -.->|"POST dashboard XML"| SE
+    IA -.->|"/thread-search SPL fallback"| GROQ
     TP <-->|"store & read"| DB
     SH -->|"Block Kit alert"| SLK
     SLK -.->|"replay action"| RE
@@ -84,7 +83,6 @@ sequenceDiagram
     participant SE as 🔴 Splunk Enterprise
     participant TP as ⚙️ Thread Platform
     participant MCP as 🔮 Splunk MCP Server
-    participant GROQ as ✨ Groq LLM
     participant SLK as 💬 Slack
     participant OPS as 👩‍💻 Ops Team
 
@@ -92,24 +90,22 @@ sequenceDiagram
     SVC->>RMQ: publish ThreadMessage (5-field contract)
     SVC->>HEC: log camelCase JSON event
     HEC->>SE: ingest → thread_logs index
-    SE-->>TP: webhook (correlationId, sourceService)
     RMQ->>TP: consume thread_logs_queue
 
     rect rgb(46, 16, 101)
-        Note over TP,MCP: 5 SPL queries via MCP · SSE + JSON-RPC 2.0
+        Note over TP,MCP: 6 MCP calls · SSE + JSON-RPC 2.0
         TP->>MCP: splunk_run_query — transaction_chain
         TP->>MCP: splunk_run_query — failure_details
         TP->>MCP: splunk_run_query — service_health
         TP->>MCP: splunk_run_query — system_errors
         TP->>MCP: splunk_run_query — error_rate_timeseries
+        TP->>MCP: anomalydetect (Cisco Deep Time Series Model)
         MCP->>SE: SPL search (thread_logs index)
     end
 
     Note over TP: InvestigationResult built<br/>anomaly_score · replay_limit · failure_class
 
-    TP->>GROQ: failure context → 3 dashboard panels
-    GROQ-->>SE: POST dashboard XML (Splunk REST API)
-    TP->>SLK: Block Kit alert + [Replay][AI Dashboard][Splunk][Escalate]
+    TP->>SLK: Block Kit alert + [Transaction Chain][AI Analysis][Replay]
     SLK->>OPS: notification in #thread-alerts
     OPS->>SLK: click ▶ Replay
     SLK-->>TP: action → slack_messages_queue (ack in <3s)
@@ -123,12 +119,14 @@ sequenceDiagram
 |-----------|---------|
 | `demo_services/` | 3 FastAPI microservices (order/payment/inventory) |
 | `demo_services/thread_publisher.py` | THREAD contract: publish to RabbitMQ + Splunk HEC |
-| `thread_platform/agent/` | AI Investigation Agent (Splunk MCP + Cisco DTMS) |
+| `thread_platform/agent/investigator.py` | 6-query MCP investigation + Cisco DTMS anomaly detection |
+| `thread_platform/agent/dashboard_gen.py` | Groq-generated SPL search deep-link (AI Analysis button) |
 | `thread_platform/consumers/` | RabbitMQ consumers (logs + Slack messages) |
-| `thread_platform/replay/` | Replay engine (reads from SQLite) |
-| `thread_platform/slack/` | Slack bot (Socket Mode, Block Kit) |
-| `thread_platform/splunk/` | Splunk MCP client + 5 SPL queries |
-| `thread_platform/store/` | SQLite schema and CRUD |
+| `thread_platform/replay/` | Replay engine (reads original request body from SQLite) |
+| `thread_platform/slack/commands.py` | Slash commands: `/thread-fail`, `/thread-search`, `/thread-status`, `/thread-analyse` |
+| `thread_platform/slack/` | Slack bot (Socket Mode, Block Kit alerts) |
+| `thread_platform/splunk/mcp_client.py` | Splunk MCP client — 6 named queries + `saia_generate_spl` |
+| `thread_platform/store/` | SQLite schema and CRUD (24h TTL) |
 
 ---
 

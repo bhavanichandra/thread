@@ -213,6 +213,12 @@ class SplunkMCPClient:
         if spl.lower().startswith("search "):
             spl = spl[7:].strip()
 
+        # Detect error responses from Splunk AI (e.g. "Service not initialized")
+        # They look like: index=thread_logs {"error": "..."} or just {"error": ...}
+        if '{"error"' in spl or '"error":' in spl:
+            print(f"[THREAD:MCP] saia_generate_spl returned error, discarding: {spl[:120]}")
+            spl = ""
+
         # Ensure the query is scoped to our index (safety net)
         if spl and f"index={SPLUNK_INDEX}" not in spl:
             spl = f"index={SPLUNK_INDEX} {spl}"
