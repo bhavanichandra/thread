@@ -165,19 +165,40 @@ class SplunkMCPClient:
             return []
 
     async def generate_spl(self, natural_language: str) -> str:
-        """Call saia_generate_spl to turn plain English into SPL via Splunk AI Assistant."""
+        """Call saia_generate_spl to turn plain English into SPL via Splunk AI Assistant.
+
+        Returns a clean SPL string without a leading 'search' keyword,
+        guaranteed to scope to SPLUNK_INDEX.  Returns empty string on failure.
+        """
         t0 = _time.monotonic()
         spl = ""
         try:
-            response = await self._call_tool("saia_generate_spl", {"query": natural_language})
+            response = await self._call_tool(
+                "saia_generate_spl",
+                {
+                    "prompt": (
+                        f"{natural_language}. "
+                        f"Only search index={SPLUNK_INDEX}. "
+                        f"Use camelCase fields: correlationId, transactionId, sourceService, "
+                        f"targetService, traceEvent, statusCode, durationMs, errorMessage, replayAttempt. "
+                        f"traceEvent values: REQUEST_START, REQUEST_END, REQUEST_ERROR."
+                    ),
+                    "spl_only": True,
+                },
+            )
+            # Try structured rows first
             rows = _parse_tool_result(response)
             if rows:
                 r = rows[0]
-                spl = r.get("spl") or r.get("query") or r.get("result") or str(r)
-            else:
+                spl = r.get("spl") or r.get("query") or r.get("generated_spl") or r.get("result") or ""
+                if not spl:
+                    # Some versions return the SPL as a top-level string value
+                    spl = next((v for v in r.values() if isinstance(v, str) and "index=" in v), "")
+            # Fallback: raw text content
+            if not spl:
                 for item in response.content:
                     text = getattr(item, "text", None)
-                    if text:
+                    if text and text.strip():
                         spl = text.strip()
                         break
         except Exception as exc:
@@ -187,8 +208,17 @@ class SplunkMCPClient:
             cause = getattr(cause, "__cause__", cause) or cause
             print(f"[THREAD:MCP] saia_generate_spl failed: {type(cause).__name__}: {cause}")
 
+        # Strip accidental leading "search" keyword — search() adds it back
+        spl = spl.strip()
+        if spl.lower().startswith("search "):
+            spl = spl[7:].strip()
+
+        # Ensure the query is scoped to our index (safety net)
+        if spl and f"index={SPLUNK_INDEX}" not in spl:
+            spl = f"index={SPLUNK_INDEX} {spl}"
+
         elapsed = (_time.monotonic() - t0) * 1000
-        print(f"[THREAD:MCP] saia_generate_spl                                       → ({elapsed:.0f}ms): {spl[:80]}")
+        print(f"[THREAD:MCP] saia_generate_spl                                       → ({elapsed:.0f}ms): {spl[:120]}")
         return spl
 
     async def search(
@@ -206,11 +236,17 @@ class SplunkMCPClient:
         t0 = _time.monotonic()
         results: list[dict] = []
 
+        # Strip a leading "search" keyword — MCP adds it automatically via
+        # the query prefix below, and saia_generate_spl sometimes returns it.
+        spl_clean = spl.strip()
+        if spl_clean.lower().startswith("search "):
+            spl_clean = spl_clean[7:].strip()
+
         try:
             response = await self._call_tool(
                 "splunk_run_query",
                 {
-                    "query":         f"search {spl}",
+                    "query":         f"search {spl_clean}",
                     "earliest_time": earliest,
                     "latest_time":   latest,
                     "row_limit":     max_results,

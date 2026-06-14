@@ -24,6 +24,9 @@ _investigated: set[str] = set()
 
 async def _investigate_and_alert(correlation_id: str, context: dict) -> None:
     try:
+        # Wait for Splunk HEC to index the event before querying via MCP
+        print(f"[THREAD] Waiting 10s for Splunk to index {correlation_id}...")
+        await asyncio.sleep(10)
         result = await _investigation_agent.investigate(correlation_id, context=context)
         await post_investigation_result(result)
     except Exception as e:

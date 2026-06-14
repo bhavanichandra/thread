@@ -133,7 +133,7 @@ async def log_to_splunk(
         },
     }
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with httpx.AsyncClient(timeout=3.0, verify=False) as client:
             await client.post(
                 f"{SPLUNK_HEC_URL}/services/collector/event",
                 headers={"Authorization": f"Splunk {SPLUNK_HEC_TOKEN}"},

@@ -21,32 +21,28 @@ THREAD_LOGS_QUEUE = os.getenv("THREAD_LOGS_QUEUE", "thread_logs_queue")
 SLACK_MESSAGES_QUEUE = os.getenv("SLACK_MESSAGES_QUEUE", "slack_messages_queue")
 
 async def setup_queues():
-    """Declare queues on startup. Idempotent — safe to run multiple times."""
+    """Declare queues on startup. Retries with backoff until RabbitMQ is ready."""
     url = get_rabbitmq_url()
-    try:
-        connection = await aio_pika.connect_robust(url, timeout=5)
-        async with connection:
-            channel = await connection.channel()
-
-            # thread_logs_queue — durable, survives restarts
-            await channel.declare_queue(
-                THREAD_LOGS_QUEUE,
-                durable=True,
-                arguments={
-                    "x-message-ttl": 86400000,  # 24h TTL in ms
-                }
-            )
-
-            # slack_messages_queue — durable
-            await channel.declare_queue(
-                SLACK_MESSAGES_QUEUE,
-                durable=True,
-            )
-
+    last_err = None
+    for attempt in range(12):
+        try:
+            connection = await aio_pika.connect_robust(url, timeout=10)
+            async with connection:
+                channel = await connection.channel()
+                await channel.declare_queue(
+                    THREAD_LOGS_QUEUE,
+                    durable=True,
+                    arguments={"x-message-ttl": 86400000},
+                )
+                await channel.declare_queue(SLACK_MESSAGES_QUEUE, durable=True)
             print(f"[THREAD] Queues ready: {THREAD_LOGS_QUEUE}, {SLACK_MESSAGES_QUEUE}")
-    except Exception as e:
-        print(f"[THREAD] Queue setup failed: {e}")
-        raise e
+            return
+        except Exception as e:
+            last_err = e
+            wait = min(2 ** attempt, 30)
+            print(f"[THREAD] RabbitMQ not ready (attempt {attempt + 1}/12), retry in {wait}s: {e}")
+            await asyncio.sleep(wait)
+    raise RuntimeError(f"RabbitMQ unreachable after 12 attempts: {last_err}")
 
 if __name__ == "__main__":
     asyncio.run(setup_queues())

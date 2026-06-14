@@ -2,20 +2,20 @@
 Dashboard generation — uses Groq LLM to create 3 SPL queries, then creates
 a dashboard in Splunk via REST API.
 """
+import logging
 import os
 import json
+import urllib.parse
 import httpx
-import logging
 from html import escape as xml_escape
 
 logger = logging.getLogger("thread-platform")
 
 SPLUNK_HOST = os.getenv("SPLUNK_HOST", "localhost")
-SPLUNK_PORT = int(os.getenv("SPLUNK_PORT", "8089"))
 SPLUNK_USERNAME = os.getenv("SPLUNK_USERNAME", "admin")
-SPLUNK_PASSWORD = os.getenv("SPLUNK_PASSWORD", "")
 SPLUNK_BASE_URL = os.getenv("SPLUNK_BASE_URL", "http://localhost:8000")
 SPLUNK_INDEX = os.getenv("SPLUNK_INDEX", "thread_logs")
+SPLUNK_MCP_TOKEN = os.getenv("SPLUNK_MCP_TOKEN", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 
@@ -29,17 +29,17 @@ def _validate_panel_specs(specs: list) -> tuple[bool, list]:
     - Returns empty list on validation failure
     """
     if not isinstance(specs, list):
-        logger.warning("[THREAD:DASHBOARD] Panel specs is not a list")
+        print("[THREAD:DASHBOARD] Panel specs is not a list")
         return False, []
 
     if len(specs) != 3:
-        logger.warning(f"[THREAD:DASHBOARD] Expected 3 panels, got {len(specs)}")
+        print(f"[THREAD:DASHBOARD] Expected 3 panels, got {len(specs)}")
         return False, []
 
     validated = []
     for i, panel in enumerate(specs):
         if not isinstance(panel, dict):
-            logger.warning(f"[THREAD:DASHBOARD] Panel {i} is not a dict")
+            print(f"[THREAD:DASHBOARD] Panel {i} is not a dict")
             return False, []
 
         title = panel.get("title", "").strip()
@@ -47,18 +47,18 @@ def _validate_panel_specs(specs: list) -> tuple[bool, list]:
         viz = panel.get("viz", "table").lower()
 
         if not title or not spl:
-            logger.warning(
+            print(
                 f"[THREAD:DASHBOARD] Panel {i} missing title or spl: "
                 f"title='{title}', spl_len={len(spl)}"
             )
             return False, []
 
         if viz not in ("table", "timechart", "bar", "column"):
-            logger.warning(f"[THREAD:DASHBOARD] Panel {i} unknown viz type: {viz}")
+            print(f"[THREAD:DASHBOARD] Panel {i} unknown viz type: {viz}")
             return False, []
 
         if len(spl) > 1000:
-            logger.warning(
+            print(
                 f"[THREAD:DASHBOARD] Panel {i} SPL too long ({len(spl)} chars), truncating to 1000"
             )
             spl = spl[:1000]
@@ -86,7 +86,7 @@ async def generate_dashboard(
     Returns the dashboard URL, or empty string on failure.
     """
     if not GROQ_API_KEY:
-        logger.warning("[THREAD:DASHBOARD] GROQ_API_KEY not set, skipping dashboard generation")
+        print("[THREAD:DASHBOARD] GROQ_API_KEY not set, skipping dashboard generation")
         return ""
 
     short_id = correlation_id[:8]
@@ -156,43 +156,25 @@ Format response as a JSON array (no markdown, no backticks):
             panels_spec = json.loads(content)
 
     except Exception as e:
-        logger.warning(f"[THREAD:DASHBOARD] LLM generation failed: {e}")
+        print(f"[THREAD:DASHBOARD] LLM generation failed: {e}")
         return ""
 
     # ── Validate panel specs ──────────────────────────────────────────────────
     is_valid, validated_specs = _validate_panel_specs(panels_spec)
     if not is_valid:
-        logger.warning("[THREAD:DASHBOARD] Panel validation failed, skipping dashboard")
+        print("[THREAD:DASHBOARD] Panel validation failed, skipping dashboard")
         return ""
 
     panels_spec = validated_specs
 
-    # ── Build Splunk dashboard XML ────────────────────────────────────────────
-    dashboard_name = f"thread-{short_id}"
-    dashboard_xml = _build_dashboard_xml(dashboard_name, correlation_id, panels_spec)
-
-    # ── Create dashboard in Splunk via REST API ───────────────────────────────
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"https://{SPLUNK_HOST}:{SPLUNK_PORT}/servicesNS/admin/search/data/ui/views",
-                auth=(SPLUNK_USERNAME, SPLUNK_PASSWORD),
-                data={
-                    "name": dashboard_name,
-                    "eai:data": dashboard_xml,
-                },
-            )
-            resp.raise_for_status()
-            logger.info(f"[THREAD:DASHBOARD] Created dashboard {dashboard_name}")
-
-    except Exception as e:
-        logger.warning(f"[THREAD:DASHBOARD] Failed to create dashboard: {e}")
-        return ""
-
-    # ── Return dashboard URL ──────────────────────────────────────────────────
-    dashboard_url = f"{SPLUNK_BASE_URL}/en-US/app/search/{dashboard_name}"
-    print(f"[THREAD:MCP] AI-generated dashboard → {dashboard_url}")
-    return dashboard_url
+    # ── Build a Splunk search deep-link (port 8089 blocked; REST POST not routable via __raw) ──
+    spl = panels_spec[0]["spl"]  # use the transaction-chain panel query
+    search_url = (
+        f"{SPLUNK_BASE_URL}/en-US/app/search/search"
+        f"?q={urllib.parse.quote('search ' + spl)}&earliest=-1h&latest=now"
+    )
+    print(f"[THREAD:MCP] AI-generated Splunk search → {search_url}")
+    return search_url
 
 
 def _build_dashboard_xml(name: str, correlation_id: str, panels_spec: list) -> str:
@@ -241,6 +223,6 @@ def _build_dashboard_xml(name: str, correlation_id: str, panels_spec: list) -> s
 """
 
     return f"""<dashboard version="1.1">
-  <label>THREAD - {correlation_id[:8]}</label>
+  <label>THREAD {correlation_id[:8]}</label>
   <description>Auto-generated by THREAD AI Agent</description>
 {panels_xml}</dashboard>"""

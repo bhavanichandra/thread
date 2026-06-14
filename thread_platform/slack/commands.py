@@ -193,7 +193,7 @@ def register_commands(app) -> None:
 
     @app.command("/thread-search")
     async def cmd_search(ack, respond, command):
-        """Plain-English Splunk search — Groq generates the SPL, executed via MCP."""
+        """Plain-English Splunk search — Splunk AI generates SPL (Groq fallback), executed via MCP."""
         await ack()
         query_text = (command.get("text") or "").strip()
 
@@ -201,23 +201,39 @@ def register_commands(app) -> None:
             await respond("Usage: `/thread-search <plain English>` e.g. `/thread-search show payment failures last hour`")
             return
 
-        await respond(f"🤖 Generating SPL via Splunk AI for: _{query_text}_...")
+        await respond(f"🤖 Generating SPL for: _{query_text}_...")
 
         from ..splunk.mcp_client import SplunkMCPClient
 
+        spl = ""
+        spl_source = ""
+
         async with SplunkMCPClient() as mcp:
+            # Primary: Splunk AI Assistant (saia_generate_spl)
             spl = await mcp.generate_spl(query_text)
+            if spl:
+                spl_source = "Splunk AI"
+                print(f"[THREAD:SEARCH] Splunk AI generated SPL: {spl}")
+            else:
+                # Fallback: Groq LLM
+                if GROQ_API_KEY:
+                    try:
+                        spl = await _groq_to_spl(query_text)
+                        spl_source = "Groq"
+                        print(f"[THREAD:SEARCH] Groq generated SPL: {spl}")
+                    except Exception as e:
+                        print(f"[THREAD:SEARCH] Groq fallback failed: {e}")
+
             if not spl:
-                await respond(f"❌ Splunk AI could not generate SPL for: `{query_text}`")
+                await respond(f"❌ Could not generate SPL for: `{query_text}`\nNo AI backend available or both returned empty.")
                 return
 
-            print(f"[THREAD:SEARCH] Splunk AI generated SPL: {spl}")
             results = await mcp.search(spl, earliest="-1h", _label=f"nl_search({query_text[:40]})")
 
         if not results:
             await respond(
                 f"*🔎 No results for:* _{query_text}_\n"
-                f"Generated SPL: `{spl[:200]}`"
+                f"_{spl_source} SPL:_ `{spl[:200]}`"
             )
             return
 
@@ -237,7 +253,7 @@ def register_commands(app) -> None:
         cols = [(f, col_widths.get(f, 20)) for f in cols_present]
 
         table = _fmt_table(results[:15], cols)
-        header = f"*🔎 {len(results)} result(s) for:* _{query_text}_\nSPL: `{spl[:200]}`\n"
+        header = f"*🔎 {len(results)} result(s) for:* _{query_text}_\n_{spl_source} SPL:_ `{spl[:200]}`\n"
         suffix = f"\n_Showing {min(15, len(results))} of {len(results)} rows_" if len(results) > 15 else ""
 
         await respond({"response_type": "in_channel", "text": header + table + suffix})
