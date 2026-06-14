@@ -149,21 +149,20 @@ def build_failure_alert_blocks(result: InvestigationResult) -> list[dict]:
     actions = [
         {
             "type": "button",
-            "text": {"type": "plain_text", "text": "🔎 View in Splunk", "emoji": True},
+            "text": {"type": "plain_text", "text": "🔎 Transaction Chain", "emoji": True},
             "url": splunk_url,
             "style": "primary",
         },
     ]
 
-    # Add dashboard button if available
+    # Add AI-generated search button if available
     if result.dashboard_url:
         actions.insert(
             1,
             {
                 "type": "button",
-                "text": {"type": "plain_text", "text": "📊 AI Dashboard", "emoji": True},
+                "text": {"type": "plain_text", "text": "🤖 AI Analysis", "emoji": True},
                 "url": result.dashboard_url,
-                "style": "primary",
             },
         )
 
